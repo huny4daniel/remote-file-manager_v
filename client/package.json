@@ -1,6 +1,6 @@
 {
-  "name": "remote-file-client",
-  "productName": "RemoteFile",
+  "name": "remote-file-manager-client",
+  "productName": "RemoteFileManager",
   "version": "1.0.0",
   "private": true,
   "description": "원격 PC 파일 탐색기 / Claude Code 터미널",
@@ -10,8 +10,8 @@
     "dist": "electron-builder --win portable"
   },
   "build": {
-    "appId": "remotefile.explorer",
-    "productName": "RemoteFile",
+    "appId": "remotefilemanager.explorer",
+    "productName": "RemoteFileManager",
     "files": [
       "src/**/*"
     ],
@@ -22,7 +22,7 @@
       "target": "portable"
     },
     "portable": {
-      "artifactName": "RemoteFile_v${version}.exe"
+      "artifactName": "RemoteFileManager_v${version}.exe"
     }
   },
   "dependencies": {

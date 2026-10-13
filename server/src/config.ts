@@ -30,8 +30,8 @@ export function loadConfig(): Config {
     user = JSON.parse(fs.readFileSync(file, 'utf8'));
   }
   const cfg = { ...defaults, ...user };
-  if (process.env.REMOTE_FILE_HOST) cfg.host = process.env.REMOTE_FILE_HOST;
-  if (process.env.REMOTE_FILE_PORT) cfg.port = Number(process.env.REMOTE_FILE_PORT);
+  if (process.env.REMOTE_FILE_MANAGER_HOST) cfg.host = process.env.REMOTE_FILE_MANAGER_HOST;
+  if (process.env.REMOTE_FILE_MANAGER_PORT) cfg.port = Number(process.env.REMOTE_FILE_MANAGER_PORT);
   return cfg;
 }
 

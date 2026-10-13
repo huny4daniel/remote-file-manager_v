@@ -42,15 +42,15 @@ jobs:
 
       - name: 서버 패키지 압축
         # 집 PC에 복사해 install.ps1로 설치하는 server 폴더 (빌드는 install.ps1이 수행)
-        run: Compress-Archive -Path server -DestinationPath "RemoteFile-server_${{ github.ref_name }}.zip"
+        run: Compress-Archive -Path server -DestinationPath "RemoteFileManager-server_${{ github.ref_name }}.zip"
 
       - name: 결과물 업로드
         uses: actions/upload-artifact@v4
         with:
           name: release-files
           path: |
-            client/dist/RemoteFile_${{ github.ref_name }}.exe
-            RemoteFile-server_${{ github.ref_name }}.zip
+            client/dist/RemoteFileManager_${{ github.ref_name }}.exe
+            RemoteFileManager-server_${{ github.ref_name }}.zip
 
   release:
     needs: build
@@ -86,5 +86,5 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           files: |
-            dist/**/RemoteFile_${{ github.ref_name }}.exe
-            dist/**/RemoteFile-server_${{ github.ref_name }}.zip
+            dist/**/RemoteFileManager_${{ github.ref_name }}.exe
+            dist/**/RemoteFileManager-server_${{ github.ref_name }}.zip

@@ -1,6 +1,6 @@
 # 자동 실행/방화벽 규칙 제거.  사용: 관리자 PowerShell에서  .\uninstall.ps1
 #Requires -RunAsAdministrator
-$name = 'RemoteFile Server'
+$name = 'RemoteFileManager Server'
 if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
   Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $name -Confirm:$false

@@ -1,5 +1,5 @@
 {
-  "name": "remote-file-server",
+  "name": "remote-file-manager-server",
   "version": "1.0.0",
   "private": true,
   "description": "집 PC에서 실행하는 원격 파일 시스템 / Claude Code 에이전트",

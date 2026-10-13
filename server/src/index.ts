@@ -28,7 +28,7 @@ app.use(express.json({ limit: '2mb' }));
 
 app.get('/api/info', (_req, res) => {
   res.json({
-    app: 'remote-file',
+    app: 'remote-file-manager',
     version: 1,
     hostname: os.hostname(),
     user: os.userInfo().username,
@@ -75,7 +75,7 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 
 server.listen(cfg.port, cfg.host, () => {
   fs.writeFileSync(path.join(rootDir, 'server.pid'), String(process.pid));
-  console.log(`remote-file 서버 실행 중: http://${cfg.host}:${cfg.port}`);
+  console.log(`remote-file-manager 서버 실행 중: http://${cfg.host}:${cfg.port}`);
   const addrs = Object.values(os.networkInterfaces())
     .flat()
     .filter((a) => a && a.family === 'IPv4' && !a.internal)

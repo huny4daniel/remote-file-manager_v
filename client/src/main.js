@@ -9,7 +9,7 @@ const { fileURLToPath } = require('node:url');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 
-app.setAppUserModelId('remotefile.explorer');
+app.setAppUserModelId('remotefilemanager.explorer');
 
 // ───────────────────────── 설정 ─────────────────────────
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
@@ -100,7 +100,7 @@ ipcMain.handle('connection:connect', async (_e, input) => {
     return { ok: false, message: '주소 형식이 올바르지 않습니다' };
   }
   const r = await api('GET', '/api/info', { server });
-  if (!r.ok || r.data?.app !== 'remote-file') return { ok: false, message: r.data?.message || '원격 PC 서버가 응답하지 않습니다' };
+  if (!r.ok || r.data?.app !== 'remote-file-manager') return { ok: false, message: r.data?.message || '원격 PC 서버가 응답하지 않습니다' };
   settings.server = server;
   settings.recent = [server, ...settings.recent.filter((s) => s !== server)].slice(0, 8);
   saveSettings();
@@ -295,7 +295,7 @@ ipcMain.handle('icon', async (_e, key, size) => {
 });
 
 // ───────────────────────── 파일 열기 (내려받아 노트북 기본 앱으로 열고, 저장하면 다시 올림) ─────────────────────────
-const cacheRoot = () => path.join(app.getPath('temp'), 'RemoteFile', 'open');
+const cacheRoot = () => path.join(app.getPath('temp'), 'RemoteFileManager', 'open');
 const watchers = new Map(); // localDir -> { watcher, files: Map<name, {remote, lastSig, timer}> }
 
 function broadcast(channel, payload) {
@@ -599,13 +599,13 @@ ipcMain.handle('download:paths', async (e, entries) => {
 /** 클립보드 이미지/드롭된 파일을 원격 임시 폴더에 올리고 원격 경로 반환 (터미널용) */
 ipcMain.handle('terminal:stage', async (_e, payload) => {
   const info = remoteInfo || (await api('GET', '/api/info')).data;
-  const dir = `${info.home}\\.remote-file\\inbox`;
+  const dir = `${info.home}\\.remote-file-manager\\inbox`;
   await api('POST', '/api/fs/mkdirp', { body: { path: dir } });
   const out = [];
   if (payload.image) {
     const png = await clipboardPng();
     if (!png) return [];
-    const tmp = path.join(app.getPath('temp'), 'RemoteFile', `paste-${Date.now()}.png`);
+    const tmp = path.join(app.getPath('temp'), 'RemoteFileManager', `paste-${Date.now()}.png`);
     await fsp.mkdir(path.dirname(tmp), { recursive: true });
     await fsp.writeFile(tmp, png);
     const remote = `${dir}\\${path.basename(tmp)}`;

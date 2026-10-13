@@ -22,14 +22,14 @@ $cfg = Get-Content "$root\config.json" -Raw | ConvertFrom-Json
 $port = if ($cfg.port) { $cfg.port } else { 7420 }
 
 # 방화벽: 허용 대역에서만 들어오도록 제한
-$ruleName = 'RemoteFile Server'
+$ruleName = 'RemoteFileManager Server'
 Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 $remote = if ($cfg.allowedIps -and $cfg.allowedIps.Count) { [string[]]$cfg.allowedIps } else { @('Any') }
 New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Protocol TCP -LocalPort $port -RemoteAddress $remote -Action Allow -Profile Any | Out-Null
 Write-Host "방화벽 규칙 추가: TCP $port ($($remote -join ', '))" -ForegroundColor Green
 
 # 로그인 시 현재 사용자 권한으로 숨김 실행 (Claude Code 로그인 정보/설정을 그대로 쓰기 위해 사용자 세션에서 실행)
-$taskName = 'RemoteFile Server'
+$taskName = 'RemoteFileManager Server'
 $node = (Get-Command node).Source
 $log = Join-Path $root 'server.log'
 $cmd = "Set-Location -LiteralPath '$root'; & '$node' dist/index.js *>> '$log'"
