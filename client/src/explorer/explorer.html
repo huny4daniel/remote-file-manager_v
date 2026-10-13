@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'" />
+  <title>파일 탐색기</title>
+  <link rel="stylesheet" href="explorer.css" />
+</head>
+<body>
+  <header id="titlebar">
+    <div class="tab active">
+      <img id="tab-icon" alt="" />
+      <span id="tab-title">파일 탐색기</span>
+    </div>
+    <button class="tb-btn" id="btn-newwin" title="새 창 (Ctrl+N)"><i>&#xE710;</i></button>
+  </header>
+
+  <div id="cmdbar">
+    <button class="nav-btn" id="btn-back" title="뒤로 (Alt+왼쪽 화살표)"><i>&#xE72B;</i></button>
+    <button class="nav-btn" id="btn-fwd" title="앞으로 (Alt+오른쪽 화살표)"><i>&#xE72A;</i></button>
+    <button class="nav-btn" id="btn-up" title="위로 (Alt+위쪽 화살표)"><i>&#xE74A;</i></button>
+    <button class="nav-btn" id="btn-refresh" title="새로 고침 (F5)"><i>&#xE72C;</i></button>
+    <div id="address">
+      <div id="crumbs"></div>
+      <input id="address-input" spellcheck="false" />
+    </div>
+    <div id="search">
+      <input id="search-input" spellcheck="false" />
+      <i>&#xE721;</i>
+    </div>
+  </div>
+
+  <div id="toolbar">
+    <button class="tool split" id="btn-new"><i class="accent">&#xE710;</i><span>새로 만들기</span><i class="chev">&#xE70D;</i></button>
+    <div class="sep"></div>
+    <button class="tool icon" id="btn-cut" title="잘라내기 (Ctrl+X)"><i>&#xE8C6;</i></button>
+    <button class="tool icon" id="btn-copy" title="복사 (Ctrl+C)"><i>&#xE8C8;</i></button>
+    <button class="tool icon" id="btn-paste" title="붙여넣기 (Ctrl+V)"><i>&#xE77F;</i></button>
+    <button class="tool icon" id="btn-rename" title="이름 바꾸기 (F2)"><i>&#xE8AC;</i></button>
+    <button class="tool icon" id="btn-delete" title="삭제 (Delete)"><i>&#xE74D;</i></button>
+    <div class="sep"></div>
+    <button class="tool" id="btn-sort"><i>&#xE8CB;</i><span>정렬</span><i class="chev">&#xE70D;</i></button>
+    <button class="tool" id="btn-view"><i>&#xE8FD;</i><span>보기</span><i class="chev">&#xE70D;</i></button>
+    <button class="tool icon" id="btn-more" title="더 보기"><i>&#xE712;</i></button>
+    <div class="spacer"></div>
+    <button class="tool claude" id="btn-claude" title="이 위치에서 Claude Code 열기"><span class="claude-mark">✻</span><span>Claude Code</span></button>
+    <button class="tool icon" id="btn-claude-more" title="터미널 옵션"><i class="chev">&#xE70D;</i></button>
+  </div>
+
+  <div id="body">
+    <nav id="sidebar"></nav>
+    <div id="splitter"></div>
+    <main id="view" tabindex="0">
+      <div id="list-header"></div>
+      <div id="list"></div>
+      <div id="empty" hidden>이 폴더는 비어 있습니다.</div>
+    </main>
+  </div>
+
+  <footer id="statusbar">
+    <span id="status-count"></span>
+    <span id="status-sel"></span>
+    <span class="spacer"></span>
+    <span id="status-progress" hidden><span id="status-progress-text"></span><span class="bar"><span></span></span></span>
+    <span id="status-conn" title=""><span class="dot"></span><span id="status-host"></span></span>
+  </footer>
+
+  <div id="toasts"></div>
+
+  <div id="connect" hidden>
+    <div class="card">
+      <div class="card-title">원격 PC에 연결</div>
+      <p class="card-desc">WireGuard로 연결된 상태에서 집 PC의 내부망 주소를 입력하거나, WireWOL 설정 파일(wirewol_settings.json)을 불러오세요.<br />집 PC에서 remote-file 서버가 실행 중이어야 합니다.</p>
+      <label>PC 주소</label>
+      <input id="connect-input" placeholder="예: 192.168.0.10:7420" spellcheck="false" />
+      <div id="connect-recent"></div>
+      <button id="connect-wirewol" class="link">WireWOL 설정 파일로 연결...</button>
+      <div id="wirewol-step" hidden>
+        <label>설정 파일 비밀번호 <span id="wirewol-file"></span></label>
+        <input id="wirewol-password" type="password" spellcheck="false" />
+      </div>
+      <div id="connect-error"></div>
+      <div class="card-actions">
+        <button id="connect-wake" class="btn" hidden>PC 켜기</button>
+        <span class="spacer"></span>
+        <button id="connect-cancel" class="btn">취소</button>
+        <button id="connect-go" class="btn primary">연결</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="explorer.js"></script>
+</body>
+</html>

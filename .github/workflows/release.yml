@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Node.js 설치
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: 버전 정보 반영
+        working-directory: client
+        run: |
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          npm version $version --no-git-tag-version --allow-same-version
+
+      - name: 의존성 설치
+        working-directory: client
+        run: npm ci
+
+      - name: exe 빌드
+        working-directory: client
+        env:
+          # 코드 서명 인증서가 없으므로 자동 탐색을 끈다
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --win portable --publish never
+
+      - name: 서버 패키지 압축
+        # 집 PC에 복사해 install.ps1로 설치하는 server 폴더 (빌드는 install.ps1이 수행)
+        run: Compress-Archive -Path server -DestinationPath "RemoteFile-server_${{ github.ref_name }}.zip"
+
+      - name: 결과물 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: |
+            client/dist/RemoteFile_${{ github.ref_name }}.exe
+            RemoteFile-server_${{ github.ref_name }}.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 결과물 다운로드
+        uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: dist
+
+      - name: 같은 부버전 기존 릴리즈 삭제
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          # v1.2.3 → 1.2 (major.minor 추출)
+          MINOR=$(echo "$TAG" | sed 's/^v//' | cut -d. -f1-2)
+
+          gh release list --repo ${{ github.repository }} --limit 100 \
+            --json tagName --jq '.[].tagName' | while read t; do
+            TM=$(echo "$t" | sed 's/^v//' | cut -d. -f1-2)
+            if [ "$TM" = "$MINOR" ] && [ "$t" != "$TAG" ]; then
+              echo "기존 릴리즈 삭제: $t"
+              gh release delete "$t" --yes --repo ${{ github.repository }}
+            fi
+          done
+
+      - name: 릴리즈 생성 및 파일 첨부
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: |
+            dist/**/RemoteFile_${{ github.ref_name }}.exe
+            dist/**/RemoteFile-server_${{ github.ref_name }}.zip

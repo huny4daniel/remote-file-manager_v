@@ -1,0 +1,37 @@
+{
+  "name": "remote-file-client",
+  "productName": "RemoteFile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "원격 PC 파일 탐색기 / Claude Code 터미널",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "build": {
+    "appId": "remotefile.explorer",
+    "productName": "RemoteFile",
+    "files": [
+      "src/**/*"
+    ],
+    "asarUnpack": [
+      "src/shell-icons.ps1"
+    ],
+    "win": {
+      "target": "portable"
+    },
+    "portable": {
+      "artifactName": "RemoteFile_v${version}.exe"
+    }
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0"
+  },
+  "devDependencies": {
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3"
+  }
+}
