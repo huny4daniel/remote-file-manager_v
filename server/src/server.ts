@@ -33,7 +33,7 @@ export function startServer(cfg: Config): Promise<RunningServer> {
   app.use((req, res, next) => {
     if (!allowIp(req.socket.remoteAddress)) {
       console.warn(`[차단] ${req.socket.remoteAddress} ${req.method} ${req.url}`);
-      return res.status(403).json({ code: 'EFORBIDDEN', message: '허용되지 않은 주소입니다' });
+      return res.status(403).json({ code: 'EFORBIDDEN', message: `허용되지 않은 주소입니다 (${req.socket.remoteAddress})` });
     }
     next();
   });

@@ -48,7 +48,7 @@ export function makeIpFilter(cidrs: string[]): (ip: string | undefined) => boole
     const [base, bitsStr] = c.split('/');
     const bits = bitsStr === undefined ? 32 : Number(bitsStr);
     const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
-    return { net: (ipToInt(base) ?? 0) & mask, mask };
+    return { net: ((ipToInt(base) ?? 0) & mask) >>> 0, mask };
   });
   return (raw) => {
     if (!raw) return false;
