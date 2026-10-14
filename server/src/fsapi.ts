@@ -4,7 +4,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { execFile } from 'node:child_process';
-import { findInRecycleBin, getDrives, moveToRecycleBin, resolveShortcut } from './winshell.js';
+import { findInRecycleBin, getDrives, getQuickAccess, moveToRecycleBin, pinQuickAccess, resolveShortcut, unpinQuickAccess } from './winshell.js';
 
 export interface Entry {
   name: string;
@@ -175,11 +175,26 @@ export function fsRouter(): Router {
   /** 바로 가기(.lnk) 대상 */
   r.get('/shortcut', wrap(async (req, res) => {
     const p = requirePath(req.query.path);
-    const target = (await resolveShortcut(p)).trim();
+    const target = await resolveShortcut(p);
     if (!target) throw new HttpError(404, 'ENOENT', '바로 가기 대상을 찾을 수 없습니다');
     const entry = await toEntry(path.dirname(target), path.basename(target));
     if (!entry || entry.type === 'link') throw new HttpError(404, 'ENOENT', `바로 가기 대상 '${target}'을(를) 찾을 수 없습니다`);
     res.json(entry);
+  }));
+
+  /** 탐색기 즐겨찾기 */
+  r.get('/quick', wrap(async (_req, res) => {
+    res.json(await getQuickAccess());
+  }));
+
+  r.post('/quick/pin', wrap(async (req, res) => {
+    await pinQuickAccess(requirePath(req.body.path));
+    res.json(await getQuickAccess());
+  }));
+
+  r.post('/quick/unpin', wrap(async (req, res) => {
+    await unpinQuickAccess(requirePath(req.body.path));
+    res.json(await getQuickAccess());
   }));
 
   r.post('/mkdir',wrap(async (req, res) => {

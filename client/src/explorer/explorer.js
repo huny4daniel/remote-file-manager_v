@@ -32,6 +32,7 @@ const state = {
   info: null,
   server: '',
   drives: [],
+  quick: null, // 탐색기 즐겨찾기 (불러오기 실패 시 null → 알려진 폴더로 대체)
   loc: { kind: 'pc' },
   items: [], // 화면에 보이는 순서
   raw: [],
@@ -484,7 +485,7 @@ function scrollToFocus() {
 function renderSidebar() {
   const sb = $('#sidebar');
   sb.replaceChildren();
-  const item = (label, iconKey, loc, glyph, indent = 0) => {
+  const item = (label, iconKey, loc, glyph, indent = 0, pinned = false) => {
     const d = el('div', 'side-item');
     d.style.setProperty('--indent', `${indent}px`);
     d.dataset.key = locKey(loc);
@@ -496,6 +497,7 @@ function renderSidebar() {
       d.append(img);
     }
     d.append(el('span', '', label));
+    if (pinned) d.append(el('span', 'pin', ''));
     d.onclick = () => navigate(loc);
     d.oncontextmenu = (e) => {
       e.preventDefault();
@@ -503,12 +505,31 @@ function renderSidebar() {
     };
     sb.append(d);
   };
-  for (const k of state.info?.knownFolders || []) item(k.name, `known:${k.id}`, { kind: 'dir', path: k.path });
+  const known = state.info?.knownFolders || [];
+  if (state.quick) {
+    for (const q of state.quick) {
+      const k = known.find((k) => k.path.toLowerCase() === q.path.toLowerCase());
+      item(k ? k.name : q.name, k ? `known:${k.id}` : 'folder', { kind: 'dir', path: q.path }, null, 0, q.pinned);
+    }
+  } else for (const k of known) item(k.name, `known:${k.id}`, { kind: 'dir', path: k.path });
   sb.append(el('div', 'side-sep'));
   item('내 PC', '', { kind: 'pc' }, '');
   for (const d of state.drives) item(driveLabel(d), `drive:${d.type}`, { kind: 'dir', path: d.path }, null, 20);
   renderSidebarActive();
 }
+async function loadQuickAccess() {
+  const r = await call('GET', '/api/fs/quick');
+  state.quick = r.ok ? r.data : null;
+}
+const quickOf = (p) => state.quick?.find((q) => q.path.toLowerCase() === p.toLowerCase());
+
+async function setQuickAccess(it, pin) {
+  const r = await call('POST', `/api/fs/quick/${pin ? 'pin' : 'unpin'}`, { body: { path: it.path } });
+  if (!r.ok) return showError(r.data?.message || '즐겨찾기를 바꾸지 못했습니다', displayName(it));
+  state.quick = r.data;
+  renderSidebar();
+}
+
 function renderSidebarActive() {
   const key = locKey(state.loc);
   for (const d of document.querySelectorAll('.side-item')) d.classList.toggle('active', d.dataset.key === key);
@@ -901,6 +922,8 @@ async function handleMenu(id, ctx = {}) {
       return runHistory(group);
     case 'props':
       return showProperties(ctx.items);
+    case 'quick':
+      return setQuickAccess(ctx.items[0], arg === 'pin');
     case 'attach':
       return window.rd.openTerminal({ sessionId: arg, kind: ctx.kind, cwd: ctx.cwd });
     case 'selectall':
@@ -918,6 +941,9 @@ async function itemMenu(items, fromSidebar = false) {
     ...(isDir ? [{ id: 'open:newwin', label: '새 창에서 열기' }] : []),
     SEP,
     ...(isDir ? [...terminalMenuItems(one.path), SEP] : []),
+    ...(isDir && state.quick
+      ? [quickOf(one.path)?.pinned ? { id: 'quick:unpin', label: '즐겨찾기에서 제거' } : { id: 'quick:pin', label: '즐겨찾기에 고정' }, SEP]
+      : []),
     ...(special ? [] : [{ id: 'cut', label: '잘라내기', accelerator: 'Ctrl+X' }]),
     ...(special ? [] : [{ id: 'copy', label: '복사', accelerator: 'Ctrl+C' }]),
     ...(isDir ? [{ id: 'paste', label: '붙여넣기', accelerator: 'Ctrl+V' }] : []),
@@ -2107,7 +2133,7 @@ async function start(info, server) {
   $('#status-conn').classList.remove('off');
   $('#status-host').textContent = info.hostname;
   $('#status-conn').title = `${info.user}@${info.hostname} — 클릭하면 다른 PC 선택`;
-  const r = await call('GET', '/api/fs/drives');
+  const [r] = await Promise.all([call('GET', '/api/fs/drives'), loadQuickAccess()]);
   if (r.ok) state.drives = r.data;
   renderSidebar();
   const startPath = new URLSearchParams(location.search).get('path');
