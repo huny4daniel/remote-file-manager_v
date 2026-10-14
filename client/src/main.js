@@ -13,13 +13,25 @@ app.setAppUserModelId('remotefilemanager.explorer');
 
 // ───────────────────────── 설정 ─────────────────────────
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
-let settings = { server: '', recent: [] };
+// pcs: 등록된 PC [{ id, name, server, mac, named }] — named가 false면 연결할 때 원격 컴퓨터 이름으로 갱신
+let settings = { server: '', pcs: [] };
 
 function loadSettings() {
   try {
     settings = { ...settings, ...JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) };
   } catch {
     /* 첫 실행 */
+  }
+  // 이전 형식(최근 주소 목록 + WireWOL 정보 하나)을 PC 목록으로 옮긴다
+  if (settings.recent) {
+    for (const s of settings.recent) upsertPc(s);
+    if (settings.wol?.mac) {
+      const pc = settings.pcs.find((p) => hostOf(p.server) === settings.wol.host);
+      if (pc) pc.mac = settings.wol.mac;
+    }
+    delete settings.recent;
+    delete settings.wol;
+    saveSettings();
   }
 }
 function saveSettings() {
@@ -34,6 +46,23 @@ function normalizeServer(input) {
   const u = new URL(s);
   if (!u.port) u.port = '7420';
   return `${u.protocol}//${u.host}`;
+}
+function hostOf(server) {
+  try {
+    return new URL(normalizeServer(server)).hostname;
+  } catch {
+    return '';
+  }
+}
+
+function upsertPc(server, fields = {}) {
+  let pc = settings.pcs.find((p) => p.server === server);
+  if (!pc) {
+    pc = { id: crypto.randomUUID(), name: server.replace(/^https?:\/\//, ''), server, mac: '', named: false };
+    settings.pcs.push(pc);
+  }
+  Object.assign(pc, fields);
+  return pc;
 }
 
 let remoteInfo = null;
@@ -88,11 +117,10 @@ function readExplorerPrefs() {
 
 ipcMain.handle('connection:get', async () => ({
   server: settings.server,
-  recent: settings.recent,
   info: remoteInfo,
   explorer: await readExplorerPrefs(),
 }));
-ipcMain.handle('connection:connect', async (_e, input) => {
+ipcMain.handle('connection:connect', async (e, input) => {
   let server;
   try {
     server = normalizeServer(input);
@@ -101,52 +129,312 @@ ipcMain.handle('connection:connect', async (_e, input) => {
   }
   const r = await api('GET', '/api/info', { server });
   if (!r.ok || r.data?.app !== 'remote-file-manager') return { ok: false, message: r.data?.message || '원격 PC 서버가 응답하지 않습니다' };
+  const changed = settings.server !== server;
   settings.server = server;
-  settings.recent = [server, ...settings.recent.filter((s) => s !== server)].slice(0, 8);
+  const pc = upsertPc(server);
+  if (!pc.named) pc.name = r.data.hostname;
   saveSettings();
   remoteInfo = r.data;
+  // 다른 PC로 바꾸면 열려 있던 다른 탐색기 창도 새 PC로 다시 연다 (터미널 창은 자기 PC에 그대로 붙어 있다)
+  if (changed) {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (w.webContents !== e.sender && !terminalWindows.has(w.webContents.id)) w.loadFile(path.join(__dirname, 'explorer', 'explorer.html'));
+    }
+  }
   return { ok: true, server, info: remoteInfo };
 });
+
+// ───────────────────────── 등록된 PC ─────────────────────────
+ipcMain.handle('pcs:list', () => settings.pcs);
+ipcMain.handle('pcs:rename', (_e, id, name) => {
+  const pc = settings.pcs.find((p) => p.id === id);
+  const n = String(name || '').trim();
+  if (!pc || !n) return false;
+  Object.assign(pc, { name: n, named: true });
+  saveSettings();
+  return true;
+});
+ipcMain.handle('pcs:remove', (_e, id) => {
+  settings.pcs = settings.pcs.filter((p) => p.id !== id);
+  saveSettings();
+  ww.updateSecrets((s) => delete s.pairings?.[id]);
+});
+
+// ───────────────────────── 실행 취소 / 다시 실행 기록 (모든 탐색기 창이 함께 쓴다) ─────────────────────────
+const history = { undo: [], redo: [] };
+const takeLast = (stack) => {
+  for (let i = stack.length - 1; i >= 0; i--) if (stack[i].server === settings.server) return stack.splice(i, 1)[0];
+  return null;
+};
+const peekLast = (stack) => stack.findLast((op) => op.server === settings.server)?.type || null;
+ipcMain.handle('history:push', (_e, op) => {
+  history.undo.push({ ...op, server: settings.server });
+  if (history.undo.length > 100) history.undo.shift();
+  history.redo = history.redo.filter((o) => o.server !== settings.server);
+});
+ipcMain.handle('history:take', (_e, which) => takeLast(history[which]));
+ipcMain.handle('history:put', (_e, which, op) => history[which].push(op));
+ipcMain.handle('history:peek', () => ({ undo: peekLast(history.undo), redo: peekLast(history.redo) }));
 ipcMain.handle('connection:info', async () => {
   const r = await api('GET', '/api/info');
   if (r.ok) remoteInfo = r.data;
   return r;
 });
 
-// ───────────────────────── WireWOL 설정 파일 (wirewol_settings.json) ─────────────────────────
-// WireWOL(안드로이드/PC) 앱이 내보낸 암호화 설정 파일에서 PC 주소와 MAC을 가져온다.
-// 형식은 wire-wol-pc_v의 app/settings_backup.py와 같다:
-//   겉 {"format":"wirewol-settings","version":1,"kdf":{PBKDF2-HMAC-SHA256,iterations,salt},
-//       "cipher":{AES-256-GCM,nonce},"data":b64(암호문+16바이트 태그)}
-//   속 {"pairing":{host,port,token,mac}|null, "wireguard_conf", "router_wol", "auto_shutdown"}
-// 토큰·WireGuard 키·공유기 비밀번호는 여기서 쓰지 않으므로 저장하지 않는다.
-const WIREWOL_FILE = 'wirewol_settings.json';
+// ───────────────────────── WireWOL 내장 (와이어가드 / PC 켜기·끄기 / 설정 파일) ─────────────────────────
+const ww = require('./wirewol');
 
-function readWireWolEnvelope(file) {
-  let env;
-  try {
-    env = JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
-  const ok =
-    env?.format === 'wirewol-settings' &&
-    env.version === 1 &&
-    env.kdf?.name === 'PBKDF2-HMAC-SHA256' &&
-    env.cipher?.name === 'AES-256-GCM' &&
-    Number.isInteger(Number(env.kdf.iterations)) &&
-    Number(env.kdf.iterations) >= 1 &&
-    Number(env.kdf.iterations) <= 10_000_000 &&
-    typeof env.kdf.salt === 'string' &&
-    typeof env.cipher.nonce === 'string' &&
-    typeof env.data === 'string';
-  return ok ? env : null;
+const portOf = (server) => Number(new URL(normalizeServer(server)).port) || 7420;
+const pairingOf = (pc) => ww.getSecrets().pairings?.[pc.id] || null;
+const pcById = (id) => settings.pcs.find((p) => p.id === id);
+
+// 와이어가드 상태: noconf | notinstalled | direct(PC에 바로 닿음) | starting | up | error
+// 집 밖이면 앱을 켤 때 켜서 끝낼 때까지 유지한다(WireWOL PC: 창을 닫아 앱을 끝낼 때만 끈다)
+const tunnel = { state: 'checking', message: '', ours: false, pending: null };
+
+function tunnelStatus() {
+  return { state: tunnel.state, message: tunnel.message, hasConf: !!ww.getSecrets().wireguardConf };
+}
+function setTunnel(state, message = '') {
+  tunnel.state = state;
+  tunnel.message = message;
+  broadcast('tunnel:state', tunnelStatus());
 }
 
+/** 와이어가드 없이 등록된 PC(서버 또는 컴패니언 포트)에 바로 닿는지 — 집 안이거나 다른 VPN이 이미 연결됨 */
+async function anyPcReachable() {
+  const checks = settings.pcs.flatMap((pc) => {
+    const p = pairingOf(pc);
+    return [ww.tcpProbe(hostOf(pc.server), portOf(pc.server)), ...(p ? [ww.tcpProbe(p.host, p.port)] : [])];
+  });
+  return checks.length > 0 && (await Promise.all(checks)).some(Boolean);
+}
+
+/** 와이어가드 확보 — 이미 켜져 있거나 PC에 바로 닿으면 그대로 두고, 아니면 내장 터널을 켠다 */
+function ensureTunnel() {
+  tunnel.pending ??= (async () => {
+    const conf = ww.getSecrets().wireguardConf;
+    if (!conf) return setTunnel('noconf');
+    if ((await ww.serviceState()) === 'running') {
+      tunnel.ours = true;
+      return setTunnel('up');
+    }
+    if (await anyPcReachable()) return setTunnel('direct');
+    if (!ww.runtimeBundled()) return setTunnel('error', '이 빌드에는 내장 WireGuard 파일이 들어 있지 않습니다');
+    if (!(await ww.tunnelInstalled())) return setTunnel('notinstalled');
+    setTunnel('starting');
+    try {
+      await ww.tunnelUp(conf);
+      tunnel.ours = true;
+      setTunnel('up');
+      // 터널을 올린 직후엔 라우팅·핸드셰이크가 끝나지 않았을 수 있어 3초짜리 연결 시도로 자리 잡을 시간을 번다
+      const pc = settings.pcs.find((p) => p.server === settings.server) || settings.pcs[0];
+      if (pc) await ww.tcpProbe(hostOf(pc.server), portOf(pc.server), 3000);
+    } catch (e) {
+      setTunnel('error', e.message);
+    }
+  })().finally(() => (tunnel.pending = null));
+  return tunnel.pending;
+}
+
+/** 설정이 바뀌면 켜져 있던 터널을 새 설정으로 다시 띄운다 */
+async function restartTunnel() {
+  if (tunnel.ours) {
+    await ww.tunnelDown().catch(() => {});
+    tunnel.ours = false;
+  }
+  await ensureTunnel();
+}
+
+// 켜 둔 터널이 서비스 오류 등으로 내려가면 다시 올린다
+setInterval(async () => {
+  if (!tunnel.ours || tunnel.pending || quitting) return;
+  if ((await ww.serviceState()) === 'running') return;
+  tunnel.ours = false;
+  ensureTunnel();
+}, 15000);
+
+let quitting = false;
+app.on('before-quit', (e) => {
+  if (quitting || !tunnel.ours) return;
+  e.preventDefault();
+  quitting = true;
+  for (const w of BrowserWindow.getAllWindows()) w.hide();
+  ww.tunnelDown()
+    .catch(() => {})
+    .finally(() => app.quit());
+});
+
+ipcMain.handle('tunnel:get', () => tunnelStatus());
+ipcMain.handle('tunnel:ensure', () => ensureTunnel().then(tunnelStatus));
+ipcMain.handle('tunnel:install', async () => {
+  setTunnel('starting', '내장 WireGuard 설치 중...');
+  const r = await ww.installTunnel();
+  if (!r.ok) {
+    setTunnel(r.cancelled ? 'notinstalled' : 'error', r.cancelled ? '' : r.message);
+    return r;
+  }
+  await ensureTunnel();
+  return { ok: true };
+});
+
+// ── PC 상태 ──
+const shutdownAtByPc = new Map(); // 컴패니언으로 예약한 종료 시각 (서버는 자기 예약을 /api/info로 알려준다)
+
+async function probeServer(server, timeout = 3000) {
+  try {
+    const res = await fetch(new URL('/api/info', server), { signal: AbortSignal.timeout(timeout) });
+    const data = await res.json().catch(() => null);
+    if (res.ok && data?.app === 'remote-file-manager') return { ok: true, hostname: data.hostname, shutdownAt: data.shutdownAt || 0 };
+    return { ok: false, message: data?.message || `응답 오류 (${res.status})` };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** 서버가 응답하면 켜짐, 서버는 없지만 컴패니언이 응답하면 "켜짐 · 서버 꺼짐" */
+ipcMain.handle('pcs:status', async (_e, id) => {
+  const pc = pcById(id);
+  if (!pc) return null;
+  const server = await probeServer(pc.server);
+  if (server.ok && !pc.named && pc.name !== server.hostname) {
+    pc.name = server.hostname;
+    saveSettings();
+  }
+  const pairing = pairingOf(pc);
+  let companion = null;
+  if (!server.ok && pairing) companion = await ww.companionPing(pairing, 3000).then(() => true, () => false);
+  const local = shutdownAtByPc.get(id) || 0;
+  const shutdownAt = Math.max(server.shutdownAt || 0, local > Date.now() ? local : 0);
+  return { server, companion, shutdownAt, name: pc.name, tunnel: tunnel.state };
+});
+
+// ── PC 켜기 ── (WireWOL PC의 _on_power_on_clicked와 같은 순서)
+ipcMain.handle('pcs:wake', async (_e, id) => {
+  const pc = pcById(id);
+  if (!pc?.mac || !ww.parseMac(pc.mac)) return { ok: false, message: 'MAC 주소가 없습니다 — PC 메뉴의 WireWOL 연결 정보에서 입력하세요' };
+  const host = hostOf(pc.server);
+  // 터널을 켜기 전에 한 번 보낸다 — 집 안인데 PC가 꺼져 있으면 터널이 켜지고, 그 뒤엔 브로드캐스트가 터널로 빠진다
+  await ww.sendMagicPacket(pc.mac, host).catch(() => {});
+  await ensureTunnel();
+  await ww.sendMagicPacket(pc.mac, host).catch(() => {});
+  let note = '';
+  try {
+    if (await ww.routerWake(pc.mac)) note = '공유기를 통해서도 깨우기 신호를 보냈습니다';
+  } catch (e) {
+    note = `원격 WOL 실패: ${e.message}`;
+  }
+  return { ok: true, note };
+});
+
+// ── PC 끄기 / 예약 / 취소 ── 서버가 처리하고, 서버가 응답하지 않으면 WireWOL 컴패니언으로 보낸다
+ipcMain.handle('pcs:shutdown', async (_e, id, delaySeconds) => {
+  const pc = pcById(id);
+  if (!pc) return { ok: false, message: 'PC를 찾을 수 없습니다' };
+  const r = await api('POST', '/api/power/shutdown', { server: pc.server, body: { delaySeconds } });
+  if (r.ok) return { ok: true, shutdownAt: r.data.shutdownAt };
+  const pairing = pairingOf(pc);
+  if (!pairing) return { ok: false, message: r.data?.message || 'PC가 응답하지 않습니다' };
+  try {
+    await ww.companionShutdown(pairing, delaySeconds);
+    const at = Date.now() + (delaySeconds ?? 10) * 1000;
+    shutdownAtByPc.set(id, at);
+    return { ok: true, shutdownAt: at, via: 'companion' };
+  } catch (e) {
+    return { ok: false, message: `종료 요청 실패: ${e.message}` };
+  }
+});
+ipcMain.handle('pcs:cancelShutdown', async (_e, id) => {
+  const pc = pcById(id);
+  if (!pc) return { ok: false };
+  const r = await api('POST', '/api/power/cancel', { server: pc.server, body: {} });
+  const pairing = pairingOf(pc);
+  let companionOk = false;
+  if (pairing && (!r.ok || shutdownAtByPc.has(id))) companionOk = await ww.companionCancel(pairing).then(() => true, () => false);
+  shutdownAtByPc.delete(id);
+  return r.ok || companionOk ? { ok: true } : { ok: false, message: r.data?.message || '취소 요청 실패' };
+});
+const currentPcId = () => settings.pcs.find((p) => p.server === settings.server)?.id;
+ipcMain.handle('pcs:current', () => currentPcId() || null);
+
+// ── PC별 WireWOL 연결 정보 (컴패니언 주소·포트·토큰, MAC) ──
+ipcMain.handle('pcs:getPairing', (_e, id) => {
+  const pc = pcById(id);
+  if (!pc) return null;
+  const p = pairingOf(pc) || {};
+  return { host: p.host || hostOf(pc.server), port: p.port || '', token: p.token || '', mac: pc.mac || '' };
+});
+ipcMain.handle('pcs:setPairing', (_e, id, v) => {
+  const pc = pcById(id);
+  if (!pc) return { ok: false, message: 'PC를 찾을 수 없습니다' };
+  const mac = String(v.mac || '').trim();
+  if (mac && !ww.parseMac(mac)) return { ok: false, message: 'MAC 주소 형식이 올바르지 않습니다 (예: AA-BB-CC-DD-EE-FF)' };
+  const host = String(v.host || '').trim();
+  const port = String(v.port || '').trim();
+  const token = String(v.token || '').trim();
+  if ((port || token) && !(host && /^\d+$/.test(port) && token)) return { ok: false, message: '컴패니언을 쓰려면 주소, 포트(숫자), 토큰을 모두 입력하세요' };
+  pc.mac = mac;
+  saveSettings();
+  ww.updateSecrets((s) => {
+    s.pairings = { ...s.pairings };
+    if (port && token) s.pairings[id] = { host, port, token };
+    else delete s.pairings[id];
+  });
+  return { ok: true };
+});
+
+// ── 공통 WireWOL 설정 (WireGuard / 공유기 원격 WOL) ──
+ipcMain.handle('ww:get', () => {
+  const s = ww.getSecrets();
+  const r = s.routerWol;
+  return { tunnel: tunnelStatus(), router: r ? { host: r.host, port: r.port, id: r.id } : null };
+});
+ipcMain.handle('ww:importConf', async (e) => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(BrowserWindow.fromWebContents(e.sender), {
+    title: 'WireGuard 설정 파일 불러오기',
+    filters: [{ name: 'WireGuard 설정', extensions: ['conf'] }],
+    properties: ['openFile'],
+  });
+  if (canceled || !filePaths[0]) return { ok: false };
+  const text = await fsp.readFile(filePaths[0], 'utf8').catch(() => '');
+  if (!/\[Interface\]/i.test(text) || !/PrivateKey\s*=/i.test(text) || !/\[Peer\]/i.test(text)) return { ok: false, message: 'WireGuard 설정 파일이 아닙니다' };
+  ww.updateSecrets((s) => (s.wireguardConf = text.replace(/^﻿/, '')));
+  restartTunnel();
+  return { ok: true };
+});
+ipcMain.handle('ww:clearConf', async () => {
+  if (tunnel.ours) await ww.tunnelDown().catch(() => {});
+  tunnel.ours = false;
+  ww.updateSecrets((s) => delete s.wireguardConf);
+  await ensureTunnel();
+  return { ok: true };
+});
+ipcMain.handle('ww:setRouter', (_e, r) => {
+  const host = String(r?.host || '').trim();
+  const port = String(r?.port || '443').trim();
+  const id = String(r?.id || '').trim();
+  const old = ww.getSecrets().routerWol;
+  const password = String(r?.password || '') || (old && old.host === host && old.id === id ? old.password : '');
+  if (!host || !/^\d+$/.test(port) || !id || !password) return { ok: false, message: '공유기 주소, 포트, 아이디, 비밀번호를 모두 입력하세요' };
+  // 인증서 지문은 새로 저장할 때 다시 받는다(공유기 교체 대응)
+  ww.updateSecrets((s) => {
+    s.routerWol = { host, port, id, password };
+    if (s.routerCertFp) delete s.routerCertFp[host];
+  });
+  return { ok: true };
+});
+ipcMain.handle('ww:clearRouter', () => {
+  ww.updateSecrets((s) => {
+    delete s.routerWol;
+    delete s.routerCertFp;
+  });
+  return { ok: true };
+});
+
+// ── 설정 파일 (wirewol_settings.json) 내보내기 / 불러오기 — WireWOL(안드로이드/PC)과 같은 형식 ──
 ipcMain.handle('wirewol:pick', async (e) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
-  const desktop = path.join(app.getPath('desktop'), WIREWOL_FILE);
-  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+  const desktop = path.join(app.getPath('desktop'), ww.BACKUP_FILE);
+  const { canceled, filePaths } = await dialog.showOpenDialog(BrowserWindow.fromWebContents(e.sender), {
     title: 'WireWOL 설정 파일 불러오기',
     defaultPath: fs.existsSync(desktop) ? desktop : app.getPath('desktop'),
     filters: [{ name: 'WireWOL 설정 파일', extensions: ['json'] }],
@@ -154,76 +442,62 @@ ipcMain.handle('wirewol:pick', async (e) => {
   });
   return canceled ? null : filePaths[0];
 });
-
 ipcMain.handle('wirewol:check', (_e, file) =>
-  readWireWolEnvelope(file) ? { ok: true, name: path.basename(file) } : { ok: false, message: 'WireWOL 설정 파일이 아닙니다' },
+  ww.readBackupEnvelope(file) ? { ok: true, name: path.basename(file) } : { ok: false, message: 'WireWOL 설정 파일이 아닙니다' },
 );
 
+/** 불러오면 WireGuard·공유기 설정은 파일 것으로 바뀌고, 파일의 PC는 목록에 추가(또는 갱신)된다 */
 ipcMain.handle('wirewol:import', async (_e, file, password) => {
-  const env = readWireWolEnvelope(file);
-  if (!env) return { ok: false, message: 'WireWOL 설정 파일이 아닙니다' };
-  const key = await new Promise((resolve, reject) =>
-    crypto.pbkdf2(Buffer.from(String(password), 'utf8'), Buffer.from(env.kdf.salt, 'base64'), Number(env.kdf.iterations), 32, 'sha256', (err, k) =>
-      err ? reject(err) : resolve(k),
-    ),
-  );
-  const data = Buffer.from(env.data, 'base64');
-  if (data.length < 17) return { ok: false, message: 'WireWOL 설정 파일이 손상되었습니다' };
-  let plain;
-  try {
-    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(env.cipher.nonce, 'base64'));
-    decipher.setAuthTag(data.subarray(data.length - 16));
-    plain = Buffer.concat([decipher.update(data.subarray(0, data.length - 16)), decipher.final()]);
-  } catch {
-    return { ok: false, wrongPassword: true, message: '비밀번호가 올바르지 않습니다' };
+  const r = await ww.decryptBackup(file, password);
+  if (!r.ok) return r;
+  const { pairing, wireguardConf, routerWol, autoShutdown } = r.contents;
+  let host = '';
+  if (pairing) {
+    host = pairing.host.trim();
+    let server;
+    try {
+      server = normalizeServer(host);
+    } catch {
+      return { ok: false, message: `설정 파일의 PC 주소가 올바르지 않습니다 (${host})` };
+    }
+    // PC가 꺼져 있어도 목록에서 켤 수 있게 연결 전에 등록해 둔다
+    const pc = upsertPc(server, ww.parseMac(pairing.mac) ? { mac: pairing.mac.trim() } : {});
+    saveSettings();
+    ww.updateSecrets((s) => (s.pairings = { ...s.pairings, [pc.id]: { host, port: pairing.port, token: pairing.token } }));
   }
-  let pairing;
-  try {
-    pairing = JSON.parse(plain.toString('utf8')).pairing;
-  } catch {
-    return { ok: false, message: 'WireWOL 설정 파일이 손상되었습니다' };
-  }
-  const host = String(pairing?.host || '').trim();
-  if (!host) return { ok: false, message: '이 설정 파일에는 등록된 PC가 없습니다' };
-  const mac = String(pairing.mac || '').trim();
-  settings.wol = { host, mac: parseMac(mac) ? mac : '' };
-  saveSettings();
-  return { ok: true, host, mac: settings.wol.mac };
+  const confChanged = (wireguardConf || null) !== (ww.getSecrets().wireguardConf || null);
+  ww.updateSecrets((s) => {
+    if (wireguardConf) s.wireguardConf = wireguardConf;
+    else delete s.wireguardConf;
+    if (routerWol) s.routerWol = routerWol;
+    else delete s.routerWol;
+    delete s.routerCertFp;
+    s.autoShutdown = autoShutdown;
+  });
+  if (confChanged) await restartTunnel();
+  else await ensureTunnel();
+  return { ok: true, host };
 });
 
-// ───────────────────────── Wake-on-LAN (WireWOL과 같은 방식) ─────────────────────────
-function parseMac(mac) {
-  const parts = String(mac || '').trim().split(/[:-]/).filter(Boolean);
-  if (parts.length !== 6 || parts.some((p) => !/^[0-9a-f]{1,2}$/i.test(p))) return null;
-  return Buffer.from(parts.map((p) => parseInt(p, 16)));
-}
-
-/** 연결하려는 주소가 WireWOL에서 가져온 PC면 그 정보를 돌려준다 */
-function wolTarget(input) {
-  const w = settings.wol;
-  if (!w?.mac) return null;
-  try {
-    return new URL(normalizeServer(input || settings.server)).hostname === w.host ? w : null;
-  } catch {
-    return null;
-  }
-}
-
-ipcMain.handle('wol:available', (_e, input) => !!wolTarget(input));
-ipcMain.handle('wol:wake', async (_e, input) => {
-  const w = wolTarget(input);
-  const mac = w && parseMac(w.mac);
-  if (!mac) return { ok: false, message: 'PC의 MAC 주소를 모릅니다' };
-  const packet = Buffer.concat([Buffer.alloc(6, 0xff), ...Array(16).fill(mac)]);
-  // 255.255.255.255는 WireGuard 터널을 넘지 못하므로 /24 지정 브로드캐스트와 PC 주소로도 보낸다
-  const targets = ['255.255.255.255'];
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(w.host)) targets.push(w.host.replace(/\.\d+$/, '.255'), w.host);
-  const sock = require('node:dgram').createSocket('udp4');
-  await new Promise((resolve) => sock.bind(() => resolve()));
-  sock.setBroadcast(true);
-  await Promise.all(targets.map((t) => new Promise((resolve) => sock.send(packet, 9, t, () => resolve()))));
-  sock.close();
-  return { ok: true };
+ipcMain.handle('wirewol:export', async (e, pcId, password) => {
+  if (String(password || '').length < 4) return { ok: false, message: '비밀번호는 4자 이상으로 정하세요' };
+  const s = ww.getSecrets();
+  const pc = pcById(pcId);
+  const p = pc && pairingOf(pc);
+  const contents = {
+    pairing: p ? { host: p.host, port: String(p.port), token: p.token, mac: pc.mac || '' } : null,
+    wireguard_conf: s.wireguardConf || null,
+    router_wol: s.routerWol ? { ...s.routerWol } : null,
+    auto_shutdown: s.autoShutdown || { enabled: false, delay_minutes: 60 },
+  };
+  const { canceled, filePath } = await dialog.showSaveDialog(BrowserWindow.fromWebContents(e.sender), {
+    title: 'WireWOL 설정 내보내기',
+    defaultPath: path.join(app.getPath('desktop'), ww.BACKUP_FILE),
+    filters: [{ name: 'WireWOL 설정 파일', extensions: ['json'] }],
+  });
+  if (canceled || !filePath) return { ok: false };
+  await fsp.writeFile(filePath, await ww.encryptBackup(contents, password));
+  return { ok: true, file: filePath, withPairing: !!p };
 });
 
 // ───────────────────────── 아이콘 (노트북의 실제 Windows 셸 아이콘) ─────────────────────────
@@ -656,7 +930,7 @@ function themeColors() {
     : { color: '#00000000', symbolColor: '#1a1a1a' };
 }
 
-function createExplorer(startPath) {
+function createExplorer(startPath, { home = false } = {}) {
   const win = new BrowserWindow({
     width: 1180,
     height: 740,
@@ -670,7 +944,9 @@ function createExplorer(startPath) {
     titleBarOverlay: { ...themeColors(), height: 40 },
     webPreferences: { preload: path.join(__dirname, 'preload.js'), sandbox: false },
   });
-  win.loadFile(path.join(__dirname, 'explorer', 'explorer.html'), { query: startPath ? { path: startPath } : {} });
+  win.loadFile(path.join(__dirname, 'explorer', 'explorer.html'), {
+    query: { ...(startPath ? { path: startPath } : {}), ...(home ? { home: '1' } : {}) },
+  });
   win.once('ready-to-show', () => win.show());
   folderIcon().then((img) => img && !win.isDestroyed() && win.setIcon(img));
   return win;
@@ -752,7 +1028,8 @@ app.on('second-instance', () => createExplorer());
 app.whenReady().then(() => {
   loadSettings();
   Menu.setApplicationMenu(null);
-  createExplorer();
+  createExplorer(null, { home: true });
+  ensureTunnel();
 });
 
 app.on('window-all-closed', () => {

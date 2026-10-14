@@ -4,4 +4,5 @@ server/config.json
 server/server.log
 server/server.pid
 client/dist/
+client/tunnel/bin/
 server/release/

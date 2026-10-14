@@ -39,6 +39,12 @@ jobs:
           npm ci --prefix client
           npm ci --prefix server
 
+      - name: 내장 WireGuard 터널 빌드
+        shell: pwsh
+        # Go와 wireguard-nt는 스크립트가 wireguard-windows 태그의 build.bat에 적힌
+        # 버전/해시 그대로 받아온다. cgo용 gcc는 러너에 기본 포함된 mingw-w64를 쓴다.
+        run: ./client/tunnel/build_tunnel.ps1
+
       - name: 노트북용 exe 빌드
         working-directory: client
         env:

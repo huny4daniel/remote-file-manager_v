@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import http from 'node:http';
 import os from 'node:os';
 import express from 'express';
@@ -22,7 +23,31 @@ export function lanAddresses(): string[] {
     .map((a) => a!.address);
 }
 
-export function startServer(cfg: Config): Promise<RunningServer> {
+/** shutdown.exe 실행 (/s /t N: N초 뒤 종료, /a: 예약 취소) */
+function runShutdown(args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile('shutdown.exe', args, { windowsHide: true }, (err, _stdout, stderr) => {
+      if (err) reject(new Error(String(stderr || err.message).trim()));
+      else resolve();
+    });
+  });
+}
+
+const MAX_SHUTDOWN_DELAY = 24 * 60 * 60 - 1;
+
+/**
+ * appVersion: 트레이 앱 버전 — 백그라운드 서버가 옛 버전이면 트레이가 새 버전으로 바꿔 띄운다
+ * onExitRequest: 같은 PC의 트레이가 백그라운드 서버를 끄라고 요청할 때 (부팅 작업으로 뜬 프로세스는
+ *                같은 계정이어도 트레이에서 직접 종료할 권한이 없다)
+ */
+export function startServer(
+  cfg: Config,
+  { appVersion = '', onExitRequest }: { appVersion?: string; onExitRequest?: () => void } = {},
+): Promise<RunningServer> {
+  // 예약된 종료 시각(epoch ms). 서버를 다시 켜면 모르지만 Windows 쪽 예약은 남아 있어 취소는 된다
+  let shutdownAt = 0;
+  const pendingShutdown = () => (shutdownAt > Date.now() ? shutdownAt : 0);
+
   const allowIp = makeIpFilter(cfg.allowedIps);
   const terminals = new TerminalManager(cfg);
   let knownFolders: KnownFolder[] = [];
@@ -43,13 +68,47 @@ export function startServer(cfg: Config): Promise<RunningServer> {
     res.json({
       app: 'remote-file-manager',
       version: 1,
+      appVersion,
+      pid: process.pid,
       hostname: os.hostname(),
       user: os.userInfo().username,
       home: os.homedir(),
       platform: process.platform,
       sep: process.platform === 'win32' ? '\\' : '/',
       knownFolders,
+      shutdownAt: pendingShutdown(),
     });
+  });
+
+  /** PC 끄기. delaySeconds가 없으면 10초 뒤 (그 사이 취소 가능) */
+  app.post('/api/power/shutdown', async (req, res) => {
+    const delay = Math.round(Number(req.body?.delaySeconds ?? 10));
+    if (!Number.isFinite(delay) || delay < 0 || delay > MAX_SHUTDOWN_DELAY) {
+      return res.status(400).json({ code: 'EINVAL', message: '종료 시간이 올바르지 않습니다' });
+    }
+    try {
+      // 이미 걸린 예약이 있으면 shutdown.exe가 거부하므로 먼저 지운다
+      await runShutdown(['/a']).catch(() => {});
+      await runShutdown(['/s', '/t', String(delay)]);
+      shutdownAt = Date.now() + delay * 1000;
+      res.json({ shutdownAt });
+    } catch (e: any) {
+      res.status(500).json({ code: 'ESHUTDOWN', message: `종료할 수 없습니다: ${e.message}` });
+    }
+  });
+  app.post('/api/power/cancel', async (_req, res) => {
+    await runShutdown(['/a']).catch(() => {});
+    shutdownAt = 0;
+    res.json({ ok: true });
+  });
+
+  app.post('/api/server/exit', (req, res) => {
+    const ip = req.socket.remoteAddress ?? '';
+    if (!onExitRequest || !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)) {
+      return res.status(403).json({ code: 'EFORBIDDEN', message: '이 PC에서만 요청할 수 있습니다' });
+    }
+    res.json({ ok: true });
+    setTimeout(onExitRequest, 100);
   });
 
   app.use('/api/fs', fsRouter());

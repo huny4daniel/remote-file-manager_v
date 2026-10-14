@@ -43,6 +43,9 @@
     <button class="tool" id="btn-view"><i>&#xE8FD;</i><span>보기</span><i class="chev">&#xE70D;</i></button>
     <button class="tool icon" id="btn-more" title="더 보기"><i>&#xE712;</i></button>
     <div class="spacer"></div>
+    <button class="tool power" id="btn-power" title="PC 끄기 (10초 뒤, 그 사이 취소 가능)"><i>&#xE7E8;</i><span>PC 끄기</span></button>
+    <button class="tool icon" id="btn-power-more" title="종료 예약"><i class="chev">&#xE70D;</i></button>
+    <div class="sep"></div>
     <button class="tool claude" id="btn-claude" title="이 위치에서 Claude Code 열기"><span class="claude-mark">✻</span><span>Claude Code</span></button>
     <button class="tool icon" id="btn-claude-more" title="터미널 옵션"><i class="chev">&#xE70D;</i></button>
   </div>
@@ -61,6 +64,7 @@
     <span id="status-count"></span>
     <span id="status-sel"></span>
     <span class="spacer"></span>
+    <span id="status-shutdown" hidden title="클릭하면 종료 예약을 취소합니다"></span>
     <span id="status-progress" hidden><span id="status-progress-text"></span><span class="bar"><span></span></span></span>
     <span id="status-conn" title=""><span class="dot"></span><span id="status-host"></span></span>
   </footer>
@@ -68,23 +72,118 @@
   <div id="toasts"></div>
 
   <div id="connect" hidden>
-    <div class="card">
-      <div class="card-title">원격 PC에 연결</div>
-      <p class="card-desc">WireGuard로 연결된 상태에서 집 PC의 내부망 주소를 입력하거나, WireWOL 설정 파일(wirewol_settings.json)을 불러오세요.<br />집 PC에서 RemoteFileManager Server가 실행 중이어야 합니다.</p>
+    <div class="card home" id="home-view">
+      <div class="card-head">
+        <div class="card-title">연결할 PC 선택</div>
+        <button id="home-settings" class="head-btn" title="WireWOL 설정 (WireGuard / 원격 WOL / 설정 파일)"><i>&#xE713;</i><span>WireWOL 설정</span></button>
+      </div>
+      <div id="wg-line"><span class="dot"></span><span id="wg-text">WireGuard 확인 중...</span><button id="wg-action" class="link" hidden></button></div>
+      <div id="pc-list"></div>
+      <div id="home-msg"></div>
+      <div class="card-actions" id="home-actions">
+        <span class="spacer"></span>
+        <button id="home-close" class="btn">닫기</button>
+      </div>
+    </div>
+    <div class="card" id="add-view" hidden>
+      <div class="card-title">PC 추가</div>
+      <p class="card-desc">집 PC의 내부망 주소를 입력하거나, WireWOL 설정 파일(wirewol_settings.json)을 불러오세요.<br />집 PC에서 RemoteFileManager Server가 실행 중이어야 합니다.</p>
       <label>PC 주소</label>
       <input id="connect-input" placeholder="예: 192.168.0.10:7420" spellcheck="false" />
-      <div id="connect-recent"></div>
-      <button id="connect-wirewol" class="link">WireWOL 설정 파일로 연결...</button>
+      <button id="connect-wirewol" class="link">WireWOL 설정 파일로 추가...</button>
       <div id="wirewol-step" hidden>
         <label>설정 파일 비밀번호 <span id="wirewol-file"></span></label>
         <input id="wirewol-password" type="password" spellcheck="false" />
       </div>
       <div id="connect-error"></div>
       <div class="card-actions">
-        <button id="connect-wake" class="btn" hidden>PC 켜기</button>
         <span class="spacer"></span>
         <button id="connect-cancel" class="btn">취소</button>
-        <button id="connect-go" class="btn primary">연결</button>
+        <button id="connect-go" class="btn primary">추가하고 연결</button>
+      </div>
+    </div>
+
+    <div class="card wide" id="settings-view" hidden>
+      <div class="card-title">WireWOL 설정</div>
+      <div class="sect">
+        <div class="sect-title">WireGuard</div>
+        <p class="sect-desc" id="set-wg-status"></p>
+        <div class="row-btns">
+          <button id="set-wg-import" class="btn">.conf 파일 불러오기...</button>
+          <button id="set-wg-clear" class="btn">삭제</button>
+        </div>
+      </div>
+      <div class="sect">
+        <div class="sect-title">원격(외부망) WOL — 공유기</div>
+        <p class="sect-desc">iptime 등 공유기의 원격 깨우기 기능으로도 PC를 켭니다. 공유기 관리자 계정이 저장되니 개인 PC에서만 설정하세요. <span id="set-r-state"></span></p>
+        <div class="grid2">
+          <input id="set-r-host" placeholder="공유기 주소" spellcheck="false" />
+          <input id="set-r-port" placeholder="포트 (기본 443)" spellcheck="false" />
+          <input id="set-r-id" placeholder="아이디" spellcheck="false" />
+          <input id="set-r-pw" type="password" placeholder="비밀번호" />
+        </div>
+        <div class="row-btns">
+          <button id="set-r-save" class="btn">저장</button>
+          <button id="set-r-clear" class="btn">삭제</button>
+        </div>
+      </div>
+      <div class="sect">
+        <div class="sect-title">설정 파일 (wirewol_settings.json)</div>
+        <p class="sect-desc">WireWOL 안드로이드/PC 앱과 같은 형식입니다. 불러오면 WireGuard·공유기 설정이 파일 내용으로 바뀌고, 파일에 든 PC가 목록에 추가됩니다.</p>
+        <div class="row-btns">
+          <button id="set-import" class="btn">불러오기...</button>
+          <button id="set-export" class="btn">내보내기...</button>
+        </div>
+        <div id="set-export-step" hidden>
+          <label>파일에 넣을 PC</label>
+          <select id="set-export-pc"></select>
+          <div class="grid2">
+            <input id="set-export-pw" type="password" placeholder="비밀번호 (4자 이상)" />
+            <input id="set-export-pw2" type="password" placeholder="비밀번호 확인" />
+          </div>
+          <div class="row-btns"><button id="set-export-go" class="btn primary">내보내기</button></div>
+        </div>
+      </div>
+      <div id="set-msg" class="msg"></div>
+      <div class="card-actions">
+        <span class="spacer"></span>
+        <button id="set-close" class="btn">닫기</button>
+      </div>
+    </div>
+    <div class="card" id="pair-view" hidden>
+      <div class="card-title">WireWOL 연결 정보 <span id="pair-name"></span></div>
+      <p class="card-desc">MAC 주소는 PC 켜기에 씁니다. WireWOL 컴패니언 정보(선택)는 RemoteFileManager Server가 응답하지 않을 때 PC 상태 확인과 종료에 씁니다.</p>
+      <label>MAC 주소</label>
+      <input id="pair-mac" placeholder="예: AA-BB-CC-DD-EE-FF" spellcheck="false" />
+      <label>컴패니언 주소 / 포트</label>
+      <div class="grid2">
+        <input id="pair-host" spellcheck="false" />
+        <input id="pair-port" placeholder="포트" spellcheck="false" />
+      </div>
+      <label>컴패니언 토큰</label>
+      <input id="pair-token" type="password" spellcheck="false" />
+      <div id="pair-msg" class="msg"></div>
+      <div class="card-actions">
+        <span class="spacer"></span>
+        <button id="pair-cancel" class="btn">취소</button>
+        <button id="pair-save" class="btn primary">저장</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal" hidden>
+    <div class="card small">
+      <div class="card-title">예약 끄기</div>
+      <p class="card-desc">몇 시간 몇 분 뒤에 PC를 끌지 고르세요(최대 23시간 59분). 새로 예약하면 기존 예약을 덮어씁니다.</p>
+      <div class="sched">
+        <input id="sched-h" type="number" min="0" max="23" value="0" /><span>시간</span>
+        <input id="sched-m" type="number" min="0" max="59" value="30" /><span>분 후</span>
+      </div>
+      <div id="sched-msg" class="msg"></div>
+      <div class="card-actions">
+        <span class="spacer"></span>
+        <button id="sched-cancel" class="btn">취소</button>
+        <button id="sched-go" class="btn primary">예약</button>
       </div>
     </div>
   </div>

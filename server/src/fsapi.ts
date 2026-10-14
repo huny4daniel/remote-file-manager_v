@@ -4,7 +4,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { execFile } from 'node:child_process';
-import { getDrives, moveToRecycleBin, resolveShortcut } from './winshell.js';
+import { findInRecycleBin, getDrives, moveToRecycleBin, resolveShortcut } from './winshell.js';
 
 export interface Entry {
   name: string;
@@ -226,6 +226,23 @@ export function fsRouter(): Router {
     res.json({ ok: true });
   }));
 
+  /** 휴지통에 버린 항목을 원래 위치로 되돌리기 (실행 취소) */
+  r.post('/restore', wrap(async (req, res) => {
+    const paths: string[] = (req.body.paths ?? []).map(requirePath);
+    const found = await Promise.all(paths.map(findInRecycleBin));
+    const missing = paths.filter((_, i) => !found[i]);
+    if (missing.length) throw new HttpError(404, 'ENOENT', `휴지통에서 찾을 수 없습니다: ${path.basename(missing[0])}`);
+    for (const p of paths) {
+      if (await exists(p)) throw new HttpError(409, 'EEXIST', `원래 위치에 같은 이름의 항목이 있습니다: ${path.basename(p)}`);
+    }
+    for (const [i, p] of paths.entries()) {
+      await fsp.mkdir(path.dirname(p), { recursive: true });
+      await fsp.rename(found[i]!.data, p);
+      await fsp.rm(found[i]!.info, { force: true });
+    }
+    res.json({ paths });
+  }));
+
   /**
    * 복사/이동. onConflict: 없음이면 충돌 시 409, 'overwrite' | 'skip' | 'rename'
    */
@@ -255,6 +272,7 @@ export function fsRouter(): Router {
     }
 
     const results: string[] = [];
+    const items: { src: string; dest: string }[] = []; // 실행 취소용 원본→대상 대응
     for (const p of plan) {
       let dest = p.dest;
       if (p.same) {
@@ -268,8 +286,9 @@ export function fsRouter(): Router {
       if (move) await movePath(p.src, dest);
       else await fsp.cp(p.src, dest, { recursive: true, force: true, preserveTimestamps: true });
       results.push(dest);
+      items.push({ src: p.src, dest });
     }
-    res.json({ paths: results });
+    res.json({ paths: results, items });
   }));
 
   r.get('/download', wrap(async (req, res) => {

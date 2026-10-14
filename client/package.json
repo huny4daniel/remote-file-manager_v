@@ -16,14 +16,25 @@
       "src/**/*"
     ],
     "asarUnpack": [
-      "src/shell-icons.ps1"
+      "src/shell-icons.ps1",
+      "src/tunnel-setup.ps1"
     ],
     "win": {
       "target": "portable"
     },
     "portable": {
       "artifactName": "RemoteFileManager_v${version}.exe"
-    }
+    },
+    "extraResources": [
+      {
+        "from": "tunnel/bin",
+        "to": "tunnel",
+        "filter": [
+          "*.dll",
+          "*.exe"
+        ]
+      }
+    ]
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
