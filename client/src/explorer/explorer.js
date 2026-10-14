@@ -1361,6 +1361,7 @@ function toast(text, kind = 'ok', { ms = 3500, action, onAction } = {}) {
   }
   $('#toasts').append(t);
   setTimeout(() => t.remove(), ms);
+  return t;
 }
 window.rd.onToast(({ text, kind }) => toast(text, kind));
 const progress = new Map();
@@ -1451,6 +1452,7 @@ function renderTunnel() {
     direct: ['up', 'PC에 바로 연결됩니다 — WireGuard 필요 없음', ''],
     starting: ['warn', t.message || 'WireGuard 연결 중...', ''],
     up: ['up', 'WireGuard 연결됨 — 프로그램을 끝낼 때 함께 꺼집니다', ''],
+    off: ['', 'PC가 꺼진 것을 확인해 WireGuard를 껐습니다', '켜기'],
     error: ['error', `WireGuard 오류: ${t.message}`, '다시 시도'],
   }[t.state] || ['', 'WireGuard 확인 중...', ''];
   line.className = cls;
@@ -1669,7 +1671,7 @@ async function pcMenu(pc) {
     { id: 'connect', label: '연결' },
     SEP,
     { id: 'wake', label: 'PC 켜기', enabled: !!pc.mac },
-    { id: 'off', label: 'PC 끄기', enabled: on },
+    { id: 'off', label: 'PC 끄기', enabled: on || !!pc.mac },
     { id: 'cancel', label: '종료 예약 취소', enabled: !!st.shutdownAt },
     SEP,
     { id: 'rename', label: '이름 바꾸기', accelerator: 'F2' },
@@ -2030,7 +2032,9 @@ async function powerOff(pc) {
     cancelId: 1,
   });
   if (response !== 0) return false;
+  const sending = toast('종료 명령을 보내는 중... (절전 상태면 깨운 뒤 다시 보냅니다)', 'ok', { ms: 40000 });
   const r = await window.rd.pcs.shutdown(pc.id, null);
+  sending.remove();
   if (!r.ok) {
     await showError(r.message, 'PC 끄기');
     return false;
@@ -2079,6 +2083,7 @@ async function doSchedule() {
   if (secs <= 0) return ($('#sched-msg').textContent = '1분 이상으로 설정하세요');
   const pc = await currentPc();
   if (!pc) return closeSchedule();
+  $('#sched-msg').textContent = '종료 예약을 보내는 중...';
   const r = await window.rd.pcs.shutdown(pc.id, secs);
   if (!r.ok) return ($('#sched-msg').textContent = r.message);
   closeSchedule();

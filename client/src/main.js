@@ -5,6 +5,8 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
+const net = require('node:net');
+const dns = require('node:dns/promises');
 const { fileURLToPath } = require('node:url');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
@@ -188,9 +190,10 @@ const portOf = (server) => Number(new URL(normalizeServer(server)).port) || 7420
 const pairingOf = (pc) => ww.getSecrets().pairings?.[pc.id] || null;
 const pcById = (id) => settings.pcs.find((p) => p.id === id);
 
-// 와이어가드 상태: noconf | notinstalled | direct(PC에 바로 닿음) | starting | up | error
+// 와이어가드 상태: noconf | notinstalled | direct(PC에 바로 닿음) | starting | up | off(PC 종료를 확인해 끔) | error
 // 집 밖이면 앱을 켤 때 켜서 끝낼 때까지 유지한다(WireWOL PC: 창을 닫아 앱을 끝낼 때만 끈다)
-const tunnel = { state: 'checking', message: '', ours: false, pending: null };
+// routes: 지금 켜 둔 터널이 맡은 주소(AllowedIPs)를 이어 붙인 것
+const tunnel = { state: 'checking', message: '', ours: false, routes: '', pending: null };
 
 function tunnelStatus() {
   return { state: tunnel.state, message: tunnel.message, hasConf: !!ww.getSecrets().wireguardConf };
@@ -210,22 +213,58 @@ async function anyPcReachable() {
   return checks.length > 0 && (await Promise.all(checks)).some(Boolean);
 }
 
-/** 와이어가드 확보 — 이미 켜져 있거나 PC에 바로 닿으면 그대로 두고, 아니면 내장 터널을 켠다 */
+const ipToInt = (ip) => ip.split('.').reduce((n, p) => ((n << 8) | Number(p)) >>> 0, 0);
+const isPrivateIp = (ip) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip);
+
+/**
+ * 내장 터널이 맡을 주소(AllowedIPs) — 등록된 PC(서버·컴패니언)의 사설 /24 대역(지정 브로드캐스트 WOL 포함).
+ * 노트북이 이미 그 대역 안에 있는 PC는 뺀다: 집 안이면 바로 닿고, 우연히 같은 대역을 쓰는 다른 망이면
+ * 터널로 보내 봐야 그 망의 기기와 충돌만 한다. 그래서 집 안에서는 PC가 꺼져 있어도 목록이 비어
+ * 터널을 켜지 않는다. 대역이 노트북 망과 겹치면 PC 주소(/32)만 넣는다.
+ */
+async function tunnelRoutes() {
+  const local = Object.entries(os.networkInterfaces())
+    .filter(([name]) => name !== ww.TUNNEL_NAME)
+    .flatMap(([, addrs]) => addrs.filter((a) => a.family === 'IPv4' && !a.internal))
+    .map((a) => ({ addr: ipToInt(a.address), mask: ipToInt(a.netmask) }));
+  const hosts = settings.pcs.flatMap((pc) => [hostOf(pc.server), pairingOf(pc)?.host].filter(Boolean));
+  const ips = await Promise.all(
+    hosts.map((h) => (net.isIPv4(h) ? h : dns.lookup(h, { family: 4 }).then((r) => r.address, () => null))),
+  );
+  const routes = new Set();
+  for (const ip of ips) {
+    if (!ip) continue;
+    const n = ipToInt(ip);
+    if (local.some((l) => ((n ^ l.addr) & l.mask) === 0)) continue;
+    const net24 = (n & 0xffffff00) >>> 0;
+    const overlaps = local.some((l) => ((l.addr & 0xffffff00) >>> 0) === net24);
+    routes.add(isPrivateIp(ip) && !overlaps ? `${ip.replace(/\.\d+$/, '.0')}/24` : `${ip}/32`);
+  }
+  return [...routes].sort();
+}
+
+/**
+ * 와이어가드 확보 — PC에 바로 닿거나 PC가 모두 노트북과 같은 망이면 켜지 않고, 아니면 내장 터널을 켠다.
+ * 이미 켜진 터널도 지금 망에서 맡을 주소가 달라졌으면(망 이동, 이전 실행에서 남은 터널) 끄고 다시 판단한다.
+ */
 function ensureTunnel() {
   tunnel.pending ??= (async () => {
     const conf = ww.getSecrets().wireguardConf;
     if (!conf) return setTunnel('noconf');
+    const routes = await tunnelRoutes();
     if ((await ww.serviceState()) === 'running') {
-      tunnel.ours = true;
-      return setTunnel('up');
+      if (tunnel.ours && tunnel.routes === routes.join()) return setTunnel('up');
+      await ww.tunnelDown().catch(() => {});
+      tunnel.ours = false;
     }
-    if (await anyPcReachable()) return setTunnel('direct');
+    if (!routes.length || (await anyPcReachable())) return setTunnel('direct');
     if (!ww.runtimeBundled()) return setTunnel('error', '이 빌드에는 내장 WireGuard 파일이 들어 있지 않습니다');
     if (!(await ww.tunnelInstalled())) return setTunnel('notinstalled');
     setTunnel('starting');
     try {
-      await ww.tunnelUp(conf);
+      await ww.tunnelUp(conf, routes);
       tunnel.ours = true;
+      tunnel.routes = routes.join();
       setTunnel('up');
       // 터널을 올린 직후엔 라우팅·핸드셰이크가 끝나지 않았을 수 있어 3초짜리 연결 시도로 자리 잡을 시간을 번다
       const pc = settings.pcs.find((p) => p.server === settings.server) || settings.pcs[0];
@@ -246,10 +285,14 @@ async function restartTunnel() {
   await ensureTunnel();
 }
 
-// 켜 둔 터널이 서비스 오류 등으로 내려가면 다시 올린다
+// 켜 둔 터널이 서비스 오류 등으로 내려가면 다시 올리고, 망이 바뀌어(예: 집에 들어옴) 맡을 주소가
+// 달라지면 다시 판단한다 — 집 안에서는 터널이 꺼진다
 setInterval(async () => {
   if (!tunnel.ours || tunnel.pending || quitting) return;
-  if ((await ww.serviceState()) === 'running') return;
+  if ((await ww.serviceState()) === 'running') {
+    if ((await tunnelRoutes()).join() !== tunnel.routes) ensureTunnel();
+    return;
+  }
   tunnel.ours = false;
   ensureTunnel();
 }, 15000);
@@ -266,7 +309,11 @@ app.on('before-quit', (e) => {
 });
 
 ipcMain.handle('tunnel:get', () => tunnelStatus());
-ipcMain.handle('tunnel:ensure', () => ensureTunnel().then(tunnelStatus));
+// 사용자가 직접 켜면 그 선택이 우선 — 남은 "종료 확인 후 끄기"가 나중에 터널을 끊지 않게 한다
+ipcMain.handle('tunnel:ensure', () => {
+  clearWgOffWatch();
+  return ensureTunnel().then(tunnelStatus);
+});
 ipcMain.handle('tunnel:install', async () => {
   setTunnel('starting', '내장 WireGuard 설치 중...');
   const r = await ww.installTunnel();
@@ -309,28 +356,83 @@ ipcMain.handle('pcs:status', async (_e, id) => {
   return { server, companion, shutdownAt, name: pc.name, tunnel: tunnel.state };
 });
 
+/** 서버나 컴패니언 중 하나라도 응답하면 켜진 것 */
+async function pcResponds(pc, timeout = 3000) {
+  if ((await probeServer(pc.server, timeout)).ok) return true;
+  const pairing = pairingOf(pc);
+  return !!pairing && (await ww.companionPing(pairing, timeout).then(() => true, () => false));
+}
+
+/** 노트북 자체가 네트워크에 붙어 있는지 — 끊겼다면 PC 무응답은 PC가 꺼졌다는 근거가 아니다 */
+const hasAnyNetwork = () =>
+  Object.entries(os.networkInterfaces()).some(
+    ([name, addrs]) => name !== ww.TUNNEL_NAME && addrs.some((a) => a.family === 'IPv4' && !a.internal),
+  );
+
+/** 매직 패킷(집 안: 브로드캐스트, 집 밖: 터널로 지정 브로드캐스트·PC 주소) + 설정돼 있으면 공유기 원격 WOL */
+async function sendWake(pc) {
+  await ww.sendMagicPacket(pc.mac, hostOf(pc.server)).catch(() => {});
+  try {
+    return (await ww.routerWake(pc.mac)) ? '공유기를 통해서도 깨우기 신호를 보냈습니다' : '';
+  } catch (e) {
+    return `원격 WOL 실패: ${e.message}`;
+  }
+}
+
+// ── 종료 확인 후 와이어가드 끄기 ── (WireWOL PC의 _arm_wireguard_off_watch와 같음)
+// 예약 시각 전엔 PC가 켜져 있는 게 정상이고(취소 요청이 터널로 나가야 한다), 시각이 됐다고 바로 끄면
+// PC 쪽에서 종료가 취소·실패해도 터널이 끊긴다 — 예약 시각부터 5초마다 확인해 무응답일 때만 끈다.
+// 10분 안에 꺼지지 않으면 그만둔다. 터널을 함께 쓰는 다른 PC가 응답하면 끄지 않는다.
+const WG_OFF_WATCH_INTERVAL_MS = 5000;
+const WG_OFF_WATCH_TIMEOUT_MS = 10 * 60 * 1000;
+const wgOffWatch = { pcId: null, from: 0, timer: null, gen: 0 };
+
+function clearWgOffWatch() {
+  clearTimeout(wgOffWatch.timer);
+  wgOffWatch.pcId = null;
+  wgOffWatch.gen++;
+}
+function armWgOffWatch(pcId, at) {
+  clearWgOffWatch();
+  if (!tunnel.ours) return;
+  wgOffWatch.pcId = pcId;
+  wgOffWatch.from = at;
+  wgOffWatch.timer = setTimeout(wgOffWatchTick, Math.max(0, at - Date.now()));
+}
+async function wgOffWatchTick() {
+  const gen = wgOffWatch.gen;
+  const pc = pcById(wgOffWatch.pcId);
+  if (!pc || !tunnel.ours || Date.now() - wgOffWatch.from > WG_OFF_WATCH_TIMEOUT_MS) return clearWgOffWatch();
+  const again = () => {
+    if (gen === wgOffWatch.gen) wgOffWatch.timer = setTimeout(wgOffWatchTick, WG_OFF_WATCH_INTERVAL_MS);
+  };
+  if (!hasAnyNetwork() || tunnel.pending || (await pcResponds(pc))) return again();
+  if (gen !== wgOffWatch.gen) return; // 그사이 해제·재설정됨
+  clearWgOffWatch();
+  const others = settings.pcs.filter((p) => p.id !== pc.id);
+  if ((await Promise.all(others.map((p) => pcResponds(p, 1500)))).some(Boolean)) return;
+  if (!tunnel.ours || tunnel.pending) return;
+  await ww.tunnelDown().catch(() => {});
+  tunnel.ours = false;
+  setTunnel('off');
+}
+
 // ── PC 켜기 ── (WireWOL PC의 _on_power_on_clicked와 같은 순서)
 ipcMain.handle('pcs:wake', async (_e, id) => {
   const pc = pcById(id);
   if (!pc?.mac || !ww.parseMac(pc.mac)) return { ok: false, message: 'MAC 주소가 없습니다 — PC 메뉴의 WireWOL 연결 정보에서 입력하세요' };
-  const host = hostOf(pc.server);
-  // 터널을 켜기 전에 한 번 보낸다 — 집 안인데 PC가 꺼져 있으면 터널이 켜지고, 그 뒤엔 브로드캐스트가 터널로 빠진다
-  await ww.sendMagicPacket(pc.mac, host).catch(() => {});
+  // 다시 켜려는 참이니 이전 종료의 "확인 후 와이어가드 끄기"가 켜는 도중 터널을 끊지 않게 한다
+  clearWgOffWatch();
+  // 터널을 켜기 전에 한 번 보낸다 — 터널이 켜진 뒤엔 255.255.255.255가 집 LAN에 닿지 않는 경우가 있다
+  await ww.sendMagicPacket(pc.mac, hostOf(pc.server)).catch(() => {});
   await ensureTunnel();
-  await ww.sendMagicPacket(pc.mac, host).catch(() => {});
-  let note = '';
-  try {
-    if (await ww.routerWake(pc.mac)) note = '공유기를 통해서도 깨우기 신호를 보냈습니다';
-  } catch (e) {
-    note = `원격 WOL 실패: ${e.message}`;
-  }
-  return { ok: true, note };
+  return { ok: true, note: await sendWake(pc) };
 });
 
 // ── PC 끄기 / 예약 / 취소 ── 서버가 처리하고, 서버가 응답하지 않으면 WireWOL 컴패니언으로 보낸다
-ipcMain.handle('pcs:shutdown', async (_e, id, delaySeconds) => {
-  const pc = pcById(id);
-  if (!pc) return { ok: false, message: 'PC를 찾을 수 없습니다' };
+const WAKE_RETRY_TIMEOUT_MS = 30000;
+
+async function sendShutdown(pc, delaySeconds) {
   const r = await api('POST', '/api/power/shutdown', { server: pc.server, body: { delaySeconds } });
   if (r.ok) return { ok: true, shutdownAt: r.data.shutdownAt };
   const pairing = pairingOf(pc);
@@ -338,11 +440,34 @@ ipcMain.handle('pcs:shutdown', async (_e, id, delaySeconds) => {
   try {
     await ww.companionShutdown(pairing, delaySeconds);
     const at = Date.now() + (delaySeconds ?? 10) * 1000;
-    shutdownAtByPc.set(id, at);
+    shutdownAtByPc.set(pc.id, at);
     return { ok: true, shutdownAt: at, via: 'companion' };
   } catch (e) {
     return { ok: false, message: `종료 요청 실패: ${e.message}` };
   }
+}
+
+// WireWOL PC의 _request_shutdown과 같은 순서: 연결 확보(집 밖이면 와이어가드) → 종료 요청 →
+// 응답이 없으면(절전이면 서버·컴패니언이 멈춰 있다) 깨우고 1초마다 확인하다 응답하는 즉시 한 번만 다시 요청
+ipcMain.handle('pcs:shutdown', async (_e, id, delaySeconds) => {
+  const pc = pcById(id);
+  if (!pc) return { ok: false, message: 'PC를 찾을 수 없습니다' };
+  await ensureTunnel();
+  let r = await sendShutdown(pc, delaySeconds);
+  if (!r.ok && pc.mac && ww.parseMac(pc.mac)) {
+    await sendWake(pc);
+    const until = Date.now() + WAKE_RETRY_TIMEOUT_MS;
+    let woke = false;
+    while (!woke && Date.now() < until) {
+      await new Promise((res) => setTimeout(res, 1000));
+      woke = await pcResponds(pc, 1500);
+    }
+    r = woke
+      ? await sendShutdown(pc, delaySeconds)
+      : { ok: false, message: 'PC가 응답하지 않아 종료할 수 없습니다(절전 상태에서 깨우기에 실패했을 수 있습니다)' };
+  }
+  if (r.ok) armWgOffWatch(id, r.shutdownAt);
+  return r;
 });
 ipcMain.handle('pcs:cancelShutdown', async (_e, id) => {
   const pc = pcById(id);
@@ -352,7 +477,9 @@ ipcMain.handle('pcs:cancelShutdown', async (_e, id) => {
   let companionOk = false;
   if (pairing && (!r.ok || shutdownAtByPc.has(id))) companionOk = await ww.companionCancel(pairing).then(() => true, () => false);
   shutdownAtByPc.delete(id);
-  return r.ok || companionOk ? { ok: true } : { ok: false, message: r.data?.message || '취소 요청 실패' };
+  if (!(r.ok || companionOk)) return { ok: false, message: r.data?.message || '취소 요청 실패' };
+  if (wgOffWatch.pcId === id) clearWgOffWatch();
+  return { ok: true };
 });
 const currentPcId = () => settings.pcs.find((p) => p.server === settings.server)?.id;
 ipcMain.handle('pcs:current', () => currentPcId() || null);

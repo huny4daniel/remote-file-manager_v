@@ -133,10 +133,36 @@ async function waitService(wanted, timeout) {
 let tunnelBusy = Promise.resolve();
 const serial = (fn) => (tunnelBusy = tunnelBusy.then(fn, fn));
 
-function tunnelUp(conf) {
+/**
+ * 터널이 집 PC로 가는 트래픽만 맡도록 .conf를 고친다(저장된 원본은 그대로).
+ *  - 첫 [Peer]의 AllowedIPs를 allowedIps로 바꾸고 나머지 피어의 AllowedIPs는 뺀다 — 0.0.0.0/0이 없으니
+ *    wireguard-windows의 kill switch(터널 밖 통신 차단)도 켜지지 않는다. 그래서 집 안에서 켜졌거나
+ *    핸드셰이크가 안 되는 터널이어도 노트북 인터넷은 끊기지 않는다.
+ *  - [Interface]의 DNS를 뺀다 — 터널 DNS(보통 집 공유기)는 터널이 막히면 이름 풀이 전체를 막는다.
+ */
+function splitConf(conf, allowedIps) {
+  let section = '';
+  let peers = 0;
+  const out = [];
+  for (const line of conf.split(/\r?\n/)) {
+    const head = /^\s*\[(\w+)\]/.exec(line);
+    if (head) {
+      section = head[1].toLowerCase();
+      out.push(line);
+      if (section === 'peer' && ++peers === 1) out.push(`AllowedIPs = ${allowedIps.join(', ')}`);
+      continue;
+    }
+    if (section === 'peer' && /^\s*AllowedIPs\s*=/i.test(line)) continue;
+    if (section === 'interface' && /^\s*DNS\s*=/i.test(line)) continue;
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+function tunnelUp(conf, allowedIps) {
   return serial(async () => {
     if ((await serviceState()) === 'running') return;
-    await fsp.writeFile(CONF_PATH, `${conf.trim()}\n`);
+    await fsp.writeFile(CONF_PATH, `${splitConf(conf, allowedIps).trim()}\n`);
     try {
       const r = await run('sc.exe', ['start', SERVICE]);
       if (r.code !== 0 && r.code !== 1056) throw new Error(`WireGuard 터널을 시작할 수 없습니다 (${r.stdout.trim().split(/\r?\n/).pop() || r.code})`);
@@ -384,6 +410,7 @@ async function encryptBackup(contents, password) {
 }
 
 module.exports = {
+  TUNNEL_NAME,
   getSecrets,
   updateSecrets,
   serviceState,
