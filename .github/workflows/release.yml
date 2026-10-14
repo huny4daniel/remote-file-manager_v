@@ -21,28 +21,38 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: client/package-lock.json
+          cache-dependency-path: |
+            client/package-lock.json
+            server/package-lock.json
 
       - name: 버전 정보 반영
-        working-directory: client
         run: |
           $version = '${{ github.ref_name }}'.TrimStart('v')
-          npm version $version --no-git-tag-version --allow-same-version
+          foreach ($dir in 'client', 'server') {
+            Push-Location $dir
+            npm version $version --no-git-tag-version --allow-same-version
+            Pop-Location
+          }
 
       - name: 의존성 설치
-        working-directory: client
-        run: npm ci
+        run: |
+          npm ci --prefix client
+          npm ci --prefix server
 
-      - name: exe 빌드
+      - name: 노트북용 exe 빌드
         working-directory: client
         env:
           # 코드 서명 인증서가 없으므로 자동 탐색을 끈다
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npx electron-builder --win portable --publish never
 
-      - name: 서버 패키지 압축
-        # 집 PC에 복사해 install.ps1로 설치하는 server 폴더 (빌드는 install.ps1이 수행)
-        run: Compress-Archive -Path server -DestinationPath "RemoteFileManager-server_${{ github.ref_name }}.zip"
+      - name: 집 PC용 서버 exe 빌드
+        working-directory: server
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          npm run build
+          npx electron-builder --win portable --publish never
 
       - name: 결과물 업로드
         uses: actions/upload-artifact@v4
@@ -50,7 +60,7 @@ jobs:
           name: release-files
           path: |
             client/dist/RemoteFileManager_${{ github.ref_name }}.exe
-            RemoteFileManager-server_${{ github.ref_name }}.zip
+            server/release/RemoteFileManager-Server_${{ github.ref_name }}.exe
 
   release:
     needs: build
@@ -87,4 +97,4 @@ jobs:
           name: ${{ github.ref_name }}
           files: |
             dist/**/RemoteFileManager_${{ github.ref_name }}.exe
-            dist/**/RemoteFileManager-server_${{ github.ref_name }}.zip
+            dist/**/RemoteFileManager-Server_${{ github.ref_name }}.exe

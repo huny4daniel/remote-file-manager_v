@@ -4,3 +4,4 @@ server/config.json
 server/server.log
 server/server.pid
 client/dist/
+server/release/

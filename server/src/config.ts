@@ -12,7 +12,7 @@ export interface Config {
   scrollbackBytes: number;
 }
 
-const defaults: Config = {
+export const defaultConfig: Config = {
   host: '0.0.0.0',
   port: 7420,
   allowedIps: ['127.0.0.1/32', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'],
@@ -23,13 +23,14 @@ const defaults: Config = {
 
 export const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-export function loadConfig(): Config {
-  const file = path.join(rootDir, 'config.json');
+/** dir의 config.json을 기본값 위에 덮어 읽는다 (트레이 앱은 사용자 데이터 폴더를 넘긴다) */
+export function loadConfig(dir = rootDir): Config {
+  const file = path.join(dir, 'config.json');
   let user: Partial<Config> = {};
   if (fs.existsSync(file)) {
     user = JSON.parse(fs.readFileSync(file, 'utf8'));
   }
-  const cfg = { ...defaults, ...user };
+  const cfg = { ...defaultConfig, ...user };
   if (process.env.REMOTE_FILE_MANAGER_HOST) cfg.host = process.env.REMOTE_FILE_MANAGER_HOST;
   if (process.env.REMOTE_FILE_MANAGER_PORT) cfg.port = Number(process.env.REMOTE_FILE_MANAGER_PORT);
   return cfg;

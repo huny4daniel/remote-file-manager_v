@@ -4,7 +4,7 @@
 WireGuard 등으로 집 내부망에 접속되어 있다는 전제에서 내부망 주소로 직접 연결합니다.
 
 ```
-노트북 (client, Electron)  ──WireGuard──▶  집 PC (server, Node.js)
+노트북 (client, Electron)  ──WireGuard──▶  집 PC (server, Electron 트레이 앱)
   탐색기 UI / 터미널 창                       파일 API · PTY(Claude Code, PowerShell)
 ```
 
@@ -12,24 +12,22 @@ WireGuard 등으로 집 내부망에 접속되어 있다는 전제에서 내부�
 
 | 폴더 | 실행 위치 | 역할 |
 | --- | --- | --- |
-| `server/` | 집 PC | 파일 조작 REST API, 터미널(PTY) WebSocket, 로그인 시 자동 실행 |
+| `server/` | 집 PC | 파일 조작 REST API, 터미널(PTY) WebSocket, 트레이 앱(방화벽·자동 실행 관리) |
 | `client/` | 노트북 | Windows 11 탐색기 형태의 앱, 원격 터미널 창 |
 
 ## 집 PC (서버) 설치
 
-요구 사항: Node.js 20 이상, Claude Code 설치 및 로그인(`claude` 명령이 PATH에 있어야 함)
+요구 사항: Claude Code 설치 및 로그인(`claude` 명령이 PATH에 있어야 함). Node.js는 필요 없습니다.
 
-1. `server` 폴더를 집 PC에 복사
-2. **관리자 PowerShell**에서
-   ```powershell
-   cd server
-   .\install.ps1
-   ```
-   - 빌드, `config.json` 생성, 방화벽 규칙(허용 대역만) 추가
-   - 작업 스케줄러에 등록해 **로그인할 때 사용자 권한으로 숨김 실행**하고 즉시 시작
-3. 마지막에 출력되는 내부망 주소(예: `192.168.0.10:7420`)를 기억
+1. [Releases](https://github.com/huny4daniel/remote-file-manager_v/releases)에서 `RemoteFileManager-Server_vX.Y.Z.exe`를 받아 원하는 곳(예: 바탕 화면)에 둡니다.
+2. 더블클릭합니다. 처음 한 번 방화벽 허용을 위한 관리자 권한(UAC) 확인 창이 뜹니다.
+3. 노트북에서 입력할 접속 주소(예: `192.168.0.10:7420`)가 표시됩니다. 이후에는 트레이 아이콘으로 실행됩니다.
 
-제거: `.\uninstall.ps1` / 수동 실행(개발): `npm run dev`
+- 처음 실행할 때 **Windows 시작 시 자동 실행**이 켜집니다. 로그인하면 창 없이 트레이에서 바로 시작됩니다.
+- 트레이 메뉴: 접속 주소 복사, 접속 정보 보기, 자동 실행 켜기/끄기, 설정 파일 열기, 로그 열기, 다시 시작, 제거, 종료
+- 제거: 트레이 메뉴 → **제거...** (자동 실행·방화벽 규칙·설정 삭제) 후 exe를 지웁니다.
+- 설정·로그 위치: `%APPDATA%\RemoteFileManager Server\` (`config.json`, `server.log`). 설정을 바꾸면 트레이 메뉴 → 다시 시작
+- 개발: `cd server && npm install` 후 `npm run dev`(Node로 서버만 실행) / `npm run app`(트레이 앱) / `npm run dist`(exe 빌드 → `server/release/`)
 
 ### config.json
 
@@ -46,9 +44,9 @@ WireGuard 등으로 집 내부망에 접속되어 있다는 전제에서 내부�
 
 - 개발 실행: `cd client && npm install && npm start`
 - 실행 파일 빌드: `npm run dist` → `client/dist/RemoteFileManager_v<버전>.exe` (설치 없이 더블클릭 실행)
-- 릴리즈: `vX.Y.Z` 태그를 푸시하면 GitHub Actions가 exe와 서버 패키지(zip)를 빌드해 [Releases](https://github.com/huny4daniel/remote-file-manager_v/releases)에 올림
+- 릴리즈: `vX.Y.Z` 태그를 푸시하면 GitHub Actions가 노트북용 exe와 집 PC용 서버 exe를 빌드해 [Releases](https://github.com/huny4daniel/remote-file-manager_v/releases)에 올림
 - 첫 실행 시 집 PC 주소를 입력하면 이후 자동 연결 (`...` 메뉴 → 다른 PC에 연결)
-- **WireWOL 설정 파일로 연결**: 연결 창에서 `WireWOL 설정 파일로 연결...`을 누르거나 `wirewol_settings.json`을 끌어다 놓고 내보낼 때 정한 비밀번호를 입력하면, 파일에 등록된 PC 주소로 바로 연결합니다(포트는 remote-file-manager 서버의 7420).
+- **WireWOL 설정 파일로 연결**: 연결 창에서 `WireWOL 설정 파일로 연결...`을 누르거나 `wirewol_settings.json`을 끌어다 놓고 내보낼 때 정한 비밀번호를 입력하면, 파일에 등록된 PC 주소로 바로 연결합니다(포트는 집 PC 서버의 7420).
   - 파일에서는 PC 주소와 MAC만 가져오고, 토큰·WireGuard 키·공유기 계정은 저장하지 않습니다. WireGuard는 지금처럼 WireWOL PC 앱으로 켜면 됩니다.
   - PC가 꺼져 있어 연결되지 않으면 `PC 켜기` 버튼이 나타납니다. WireWOL과 같은 방식으로 매직 패킷을 보낸 뒤, PC가 켜져 서버가 응답할 때까지 자동으로 다시 연결합니다.
 

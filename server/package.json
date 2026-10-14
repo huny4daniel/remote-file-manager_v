@@ -1,14 +1,17 @@
 {
   "name": "remote-file-manager-server",
+  "productName": "RemoteFileManager Server",
   "version": "1.0.0",
   "private": true,
-  "description": "집 PC에서 실행하는 원격 파일 시스템 / Claude Code 에이전트",
+  "description": "집 PC에서 실행하는 원격 파일 관리 / Claude Code 서버 (트레이 앱)",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "app/main.mjs",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p .",
     "start": "node dist/index.js",
+    "app": "tsc -p . && electron .",
+    "dist": "tsc -p . && electron-builder --win portable",
     "typecheck": "tsc -p . --noEmit"
   },
   "dependencies": {
@@ -20,7 +23,30 @@
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.5",
     "@types/ws": "^8.18.2",
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
+  },
+  "build": {
+    "appId": "remotefilemanager.server",
+    "productName": "RemoteFileManager Server",
+    "directories": {
+      "output": "release"
+    },
+    "npmRebuild": false,
+    "files": [
+      "dist/**/*",
+      "app/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/node-pty/**"
+    ],
+    "win": {
+      "target": "portable"
+    },
+    "portable": {
+      "artifactName": "RemoteFileManager-Server_v${version}.exe"
+    }
   }
 }

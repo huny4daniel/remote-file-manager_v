@@ -42,6 +42,11 @@ export class TerminalManager {
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     // 서버가 Claude Code 안에서 실행된 경우 중첩 세션 감지 변수가 따라 들어가지 않게 제거
     for (const k of SESSION_ENV_MARKERS) delete env[k];
+    // 트레이 앱(Electron/portable) 자체의 변수도 넘기지 않는다
+    for (const k of Object.keys(env)) if (/^(ELECTRON_|PORTABLE_EXECUTABLE_)/i.test(k)) delete env[k];
+    // PowerShell 7에서 서버를 띄우면 PS7 전용 모듈 경로가 상속되어 Windows PowerShell이 PSReadLine을
+    // 못 불러온다. 비워 두면 셸이 자기 기본 경로를 다시 계산한다
+    if (/(^|[\\/])powershell(\.exe)?$/i.test(this.cfg.shell)) delete env.PSModulePath;
     env.TERM = 'xterm-256color';
     env.COLORTERM = 'truecolor';
 
