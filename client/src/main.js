@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, dialog, shell, nativeTheme, clipboard, Notification, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, dialog, shell, nativeTheme, clipboard, Notification, nativeImage, protocol } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -12,6 +12,11 @@ const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 
 app.setAppUserModelId('remotefilemanager.explorer');
+
+// 원격 PC의 웹 페이지 미리 보기 — 페이지가 요청하는 css/js/이미지를 그때그때 원격 PC에서 가져온다
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'rfm-site', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
+]);
 
 // ───────────────────────── 설정 ─────────────────────────
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
@@ -713,13 +718,19 @@ async function downloadTo(remotePath, localPath, onProgress) {
   }
   const total = Number(res.headers.get('content-length') || 0);
   let done = 0;
-  const body = Readable.fromWeb(res.body);
-  body.on('data', (c) => {
-    done += c.length;
-    onProgress?.(done, total);
-  });
   await fsp.mkdir(path.dirname(localPath), { recursive: true });
-  await pipeline(body, fs.createWriteStream(localPath));
+  // 진행률은 파이프라인 안에서 센다 — 'data' 리스너를 먼저 달면 쓰기 스트림이 붙기 전에 흘러간 내용이 버려진다
+  await pipeline(
+    Readable.fromWeb(res.body),
+    async function* (source) {
+      for await (const chunk of source) {
+        done += chunk.length;
+        onProgress?.(done, total);
+        yield chunk;
+      }
+    },
+    fs.createWriteStream(localPath),
+  );
 }
 
 async function uploadFrom(localPath, remotePath, overwrite) {
@@ -789,7 +800,159 @@ function remoteJoin(dir, name) {
 
 const NOT_OPENABLE = new Set(['exe', 'msi', 'bat', 'cmd', 'com', 'lnk', 'scr', 'ps1', 'vbs', 'sys', 'dll']);
 
-ipcMain.handle('file:open', async (e, remotePath) => {
+// 창에서 바로 볼 수 있는 형식 (그 밖의 파일은 내용을 살펴 텍스트면 창으로, 아니면 노트북 기본 앱으로)
+const VIEW_KINDS = {
+  image: ['png', 'jpg', 'jpeg', 'jfif', 'gif', 'webp', 'bmp', 'ico', 'svg', 'avif'],
+  video: ['mp4', 'm4v', 'webm', 'mkv', 'mov', 'ogv'],
+  audio: ['mp3', 'wav', 'ogg', 'oga', 'm4a', 'aac', 'flac', 'opus', 'weba'],
+  pdf: ['pdf'],
+};
+// 텍스트가 아닌 게 분명해 내용을 살필 필요 없이 기본 앱으로 넘기는 형식
+const EXTERNAL_ONLY = new Set([
+  'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'hwp', 'hwpx', 'zip', '7z', 'rar', 'iso', 'psd', 'ai',
+]);
+const TEXT_SNIFF_MAX = 20 * 1024 * 1024;
+const HTML_EXTS = new Set(['html', 'htm', 'xhtml']);
+
+// ── 웹 페이지 미리 보기 (rfm-site://pc-<해시>/C/폴더/index.html → 원격 C:\폴더\index.html) ──
+const siteHosts = new Map(); // host -> server
+const SITE_MIME = {
+  html: 'text/html', htm: 'text/html', xhtml: 'application/xhtml+xml', css: 'text/css', js: 'text/javascript',
+  mjs: 'text/javascript', cjs: 'text/javascript', json: 'application/json', map: 'application/json',
+  webmanifest: 'application/manifest+json', xml: 'application/xml', txt: 'text/plain', csv: 'text/csv', md: 'text/plain',
+  svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+  avif: 'image/avif', ico: 'image/x-icon', bmp: 'image/bmp', woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf',
+  otf: 'font/otf', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', mp4: 'video/mp4',
+  webm: 'video/webm', wasm: 'application/wasm', pdf: 'application/pdf',
+};
+
+function siteUrlOf(remotePath) {
+  const host = `pc-${crypto.createHash('sha1').update(settings.server).digest('hex').slice(0, 10)}`;
+  siteHosts.set(host, settings.server);
+  const m = /^([A-Za-z]):[\\/]*(.*)$/.exec(remotePath);
+  if (!m) return null;
+  const rest = m[2].split(/[\\/]+/).filter(Boolean).map(encodeURIComponent).join('/');
+  return `rfm-site://${host}/${m[1].toUpperCase()}/${rest}`;
+}
+
+function remotePathOfSiteUrl(u) {
+  let segs;
+  try {
+    segs = u.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  } catch {
+    return null;
+  }
+  if (!segs.length || !/^[A-Za-z]$/.test(segs[0]) || segs.some((x) => x === '..' || /[\\/]/.test(x))) return null;
+  return `${segs[0].toUpperCase()}:\\${segs.slice(1).join('\\')}`;
+}
+
+async function fetchSite(server, remotePath) {
+  const url = new URL('/api/fs/download', server);
+  url.searchParams.set('path', remotePath);
+  return fetch(url, { signal: AbortSignal.timeout(120000) });
+}
+
+function registerSiteProtocol() {
+  protocol.handle('rfm-site', async (req) => {
+    const u = new URL(req.url);
+    const server = siteHosts.get(u.hostname);
+    let remotePath = remotePathOfSiteUrl(u);
+    if (!server || !remotePath) return new Response('잘못된 주소입니다', { status: 400 });
+    try {
+      let res = await fetchSite(server, remotePath);
+      // 폴더 주소면 그 안의 index.html
+      if (res.status === 400 && !path.extname(remotePath)) {
+        remotePath = remoteJoin(remotePath, 'index.html');
+        res = await fetchSite(server, remotePath);
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return new Response(err.message || '파일을 찾을 수 없습니다', { status: res.status === 400 ? 404 : res.status, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+      }
+      const ext = path.extname(remotePath).slice(1).toLowerCase();
+      const headers = {
+        'content-type': SITE_MIME[ext] || 'application/octet-stream',
+        // Claude Code 등이 고친 내용이 새로 고침(F5)에 바로 보이게
+        'cache-control': 'no-store',
+      };
+      if (res.headers.get('content-length')) headers['content-length'] = res.headers.get('content-length');
+      return new Response(res.body, { status: 200, headers });
+    } catch (e) {
+      return new Response(`원격 PC에 연결할 수 없습니다 (${e.cause?.code || e.message})`, { status: 502, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+    }
+  });
+}
+
+ipcMain.handle('viewer:siteUrl', (_e, remotePath) => siteUrlOf(remotePath));
+ipcMain.handle('viewer:devtools', (e) => e.sender.openDevTools({ mode: 'detach' }));
+
+function viewKindOf(ext) {
+  for (const [kind, list] of Object.entries(VIEW_KINDS)) if (list.includes(ext)) return kind;
+  return null;
+}
+
+/** 앞부분에 NUL 바이트가 없으면 텍스트로 본다 (UTF-16은 BOM으로 구분) */
+async function looksLikeText(localPath, size) {
+  if (size > TEXT_SNIFF_MAX) return false;
+  if (size === 0) return true;
+  const fh = await fsp.open(localPath, 'r');
+  try {
+    const buf = Buffer.alloc(Math.min(size, 8192));
+    await fh.read(buf, 0, buf.length, 0);
+    if ((buf[0] === 0xff && buf[1] === 0xfe) || (buf[0] === 0xfe && buf[1] === 0xff)) return true;
+    return !buf.includes(0);
+  } finally {
+    await fh.close();
+  }
+}
+
+function decodeText(buf) {
+  if (buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) return { text: new TextDecoder('utf-8').decode(buf.subarray(3)), encoding: 'UTF-8 (BOM)' };
+  if (buf[0] === 0xff && buf[1] === 0xfe) return { text: new TextDecoder('utf-16le').decode(buf.subarray(2)), encoding: 'UTF-16 LE' };
+  if (buf[0] === 0xfe && buf[1] === 0xff) return { text: new TextDecoder('utf-16be').decode(buf.subarray(2)), encoding: 'UTF-16 BE' };
+  try {
+    return { text: new TextDecoder('utf-8', { fatal: true }).decode(buf), encoding: 'UTF-8' };
+  } catch {
+    return { text: new TextDecoder('euc-kr').decode(buf), encoding: 'ANSI (EUC-KR)' };
+  }
+}
+
+function localCachePath(remotePath) {
+  const hash = crypto.createHash('sha1').update(`${settings.server}|${remoteDirname(remotePath).toLowerCase()}`).digest('hex').slice(0, 12);
+  return path.join(cacheRoot(), hash, remoteBasename(remotePath));
+}
+
+/** 내려받은 사본이 캐시 폴더 안의 것인지 (뷰어가 넘긴 경로를 그대로 믿지 않는다) */
+function inCache(localPath) {
+  const rel = path.relative(cacheRoot(), path.resolve(localPath));
+  return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+async function fetchForOpen(win, remotePath) {
+  const name = remoteBasename(remotePath);
+  const localPath = localCachePath(remotePath);
+  try {
+    broadcast('progress', { id: remotePath, text: `${name} 여는 중...`, value: 0 });
+    await downloadTo(remotePath, localPath, (d, t) =>
+      broadcast('progress', { id: remotePath, text: `${name} 여는 중...`, value: t ? d / t : 0 }),
+    );
+    return localPath;
+  } catch (err) {
+    dialog.showMessageBox(win, { type: 'error', title: name, message: err.message });
+    return null;
+  } finally {
+    broadcast('progress', { id: remotePath, done: true });
+  }
+}
+
+async function openExternally(win, localPath, remotePath) {
+  watchForSave(localPath, remotePath);
+  const err = await shell.openPath(localPath);
+  if (err) dialog.showMessageBox(win, { type: 'error', title: remoteBasename(remotePath), message: err });
+  return !err;
+}
+
+ipcMain.handle('file:open', async (e, remotePath, { external = false } = {}) => {
   const name = remoteBasename(remotePath);
   const ext = path.extname(name).slice(1).toLowerCase();
   const win = BrowserWindow.fromWebContents(e.sender);
@@ -806,23 +969,36 @@ ipcMain.handle('file:open', async (e, remotePath) => {
     if (response === 0) openTerminal({ kind: 'shell', cwd: remoteDirname(remotePath) });
     return { ok: false };
   }
-  const hash = crypto.createHash('sha1').update(`${settings.server}|${remoteDirname(remotePath).toLowerCase()}`).digest('hex').slice(0, 12);
-  const localPath = path.join(cacheRoot(), hash, name);
-  try {
-    broadcast('progress', { id: remotePath, text: `${name} 여는 중...`, value: 0 });
-    await downloadTo(remotePath, localPath, (d, t) =>
-      broadcast('progress', { id: remotePath, text: `${name} 여는 중...`, value: t ? d / t : 0 }),
-    );
-  } catch (err) {
-    broadcast('progress', { id: remotePath, done: true });
-    dialog.showMessageBox(win, { type: 'error', title: name, message: err.message });
-    return { ok: false };
+  const localPath = await fetchForOpen(win, remotePath);
+  if (!localPath) return { ok: false };
+  if (!external) {
+    const size = (await fsp.stat(localPath)).size;
+    let kind = HTML_EXTS.has(ext) ? 'html' : viewKindOf(ext);
+    if (!kind && !EXTERNAL_ONLY.has(ext) && (await looksLikeText(localPath, size))) kind = 'text';
+    if (kind) {
+      openViewer({ kind, localPath, remotePath, size });
+      return { ok: true };
+    }
   }
-  broadcast('progress', { id: remotePath, done: true });
-  watchForSave(localPath, remotePath);
-  const err = await shell.openPath(localPath);
-  if (err) dialog.showMessageBox(win, { type: 'error', title: name, message: err });
-  return { ok: !err };
+  return { ok: await openExternally(win, localPath, remotePath) };
+});
+
+/** 뷰어 창의 "기본 앱으로 열기" — 이미 내려받은 사본을 그대로 쓴다 */
+ipcMain.handle('viewer:external', async (e, localPath, remotePath) => {
+  if (!inCache(localPath)) return false;
+  return openExternally(BrowserWindow.fromWebContents(e.sender), localPath, remotePath);
+});
+
+ipcMain.handle('viewer:text', async (_e, localPath) => {
+  if (!inCache(localPath)) throw new Error('잘못된 경로입니다');
+  const buf = await fsp.readFile(localPath);
+  return decodeText(buf);
+});
+
+ipcMain.handle('viewer:reload', async (e, remotePath) => {
+  const localPath = await fetchForOpen(BrowserWindow.fromWebContents(e.sender), remotePath);
+  if (!localPath) return null;
+  return { localPath, size: (await fsp.stat(localPath)).size };
 });
 
 // ───────────────────────── 노트북 ↔ 원격 전송 ─────────────────────────
@@ -1028,7 +1204,14 @@ ipcMain.handle('clipboard:hasImage', () => clipboard.has('image/png').catch(() =
 ipcMain.handle('menu:popup', (e, template) => {
   const win = BrowserWindow.fromWebContents(e.sender);
   return new Promise((resolve) => {
-    let chosen = null;
+    // Windows에서는 항목 click이 메뉴가 닫힌(callback) 뒤에 늦게 올 때가 있다.
+    // click이 오면 바로 확정하고, 닫힘은 잠시 기다렸다가 아무것도 안 골랐을 때만 null로 끝낸다
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
     const build = (items) =>
       items.map((it) =>
         it.type === 'separator'
@@ -1041,10 +1224,10 @@ ipcMain.handle('menu:popup', (e, template) => {
               type: it.checked !== undefined ? 'checkbox' : 'normal',
               checked: it.checked,
               submenu: it.submenu ? build(it.submenu) : undefined,
-              click: it.submenu ? undefined : () => (chosen = it.id),
+              click: it.submenu ? undefined : () => done(it.id),
             },
       );
-    Menu.buildFromTemplate(build(template)).popup({ window: win, callback: () => setImmediate(() => resolve(chosen)) });
+    Menu.buildFromTemplate(build(template)).popup({ window: win, callback: () => setTimeout(() => done(null), 500) });
   });
 });
 
@@ -1094,13 +1277,60 @@ async function folderIcon() {
   return folderIconImage;
 }
 
+function openViewer({ kind, localPath, remotePath, size }) {
+  const win = new BrowserWindow({
+    width: kind === 'audio' ? 560 : 1000,
+    height: kind === 'audio' ? 300 : 720,
+    minWidth: 420,
+    minHeight: 240,
+    show: false,
+    title: remoteBasename(remotePath),
+    backgroundMaterial: 'mica',
+    backgroundColor: '#00000000',
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { ...themeColors(), height: 40 },
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), sandbox: false, plugins: true },
+  });
+  // PDF는 내장 뷰어가 프레임을 다시 불러오면서 로드 promise가 실패로 끝나므로 무시한다
+  win.loadFile(path.join(__dirname, 'viewer', 'viewer.html'), {
+    query: { kind, local: localPath, remote: remotePath, size: String(size) },
+  }).catch(() => {});
+  win.once('ready-to-show', () => win.show());
+  // 미리 보기 페이지(하위 프레임)에 포커스가 있어도 창 단축키가 듣게 여기서 받는다
+  win.webContents.on('before-input-event', (e, input) => {
+    if (input.type !== 'keyDown') return;
+    const key = input.code;
+    const cmd =
+      key === 'F5' || (input.control && key === 'KeyR') ? 'reload'
+        : input.control && key === 'KeyW' ? 'close'
+        : key === 'F12' || (input.control && input.shift && key === 'KeyI') ? 'devtools'
+        : null;
+    if (!cmd) return;
+    e.preventDefault();
+    if (cmd === 'close') win.close();
+    else if (cmd === 'devtools') win.webContents.openDevTools({ mode: 'detach' });
+    else win.webContents.send('viewer:key', cmd);
+  });
+  // 뷰어 안의 링크(PDF 등)는 노트북 브라우저로
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  return win;
+}
+
 const terminalWindows = new Map(); // webContents.id -> sessionId
 
 async function openTerminal({ kind, cwd, sessionId }) {
+  // 세션을 만들고 창이 그려질 때까지 몇 초 걸릴 수 있어 상태 표시줄에 알린다
+  const progressId = `terminal-${Date.now()}`;
+  broadcast('progress', { id: progressId, text: `${kind === 'shell' ? '터미널' : 'Claude Code'} 여는 중...`, value: 0 });
+  const endProgress = () => broadcast('progress', { id: progressId, done: true });
   let id = sessionId;
   if (!id) {
     const r = await api('POST', '/api/terminals', { body: { kind, cwd, cols: 120, rows: 32 } });
     if (!r.ok) {
+      endProgress();
       dialog.showMessageBox({ type: 'error', title: '터미널', message: r.data?.message || '터미널을 열 수 없습니다' });
       return null;
     }
@@ -1123,7 +1353,11 @@ async function openTerminal({ kind, cwd, sessionId }) {
   win.loadFile(path.join(__dirname, 'terminal', 'terminal.html'), {
     query: { id, kind: kind || '', cwd: cwd || '', server: settings.server },
   });
-  win.once('ready-to-show', () => win.show());
+  win.once('ready-to-show', () => {
+    endProgress();
+    win.show();
+  });
+  win.once('closed', endProgress);
   win.on('closed', () => {
     const sid = terminalWindows.get(wcId);
     terminalWindows.delete(wcId);
@@ -1155,6 +1389,7 @@ app.on('second-instance', () => createExplorer());
 app.whenReady().then(() => {
   loadSettings();
   Menu.setApplicationMenu(null);
+  registerSiteProtocol();
   createExplorer(null, { home: true });
   ensureTunnel();
 });

@@ -580,7 +580,7 @@ function selectIndex(i, { ctrl = false, shift = false } = {}) {
 // ───────────────────────── 동작 ─────────────────────────
 const currentDir = () => (state.loc.kind === 'dir' ? state.loc.path : null);
 
-async function openItem(it, { newWindow = false } = {}) {
+async function openItem(it, { newWindow = false, external = false } = {}) {
   if (it.type === 'dir') {
     if (newWindow) return window.rd.newWindow(it.path);
     return openDir(it.path);
@@ -588,9 +588,9 @@ async function openItem(it, { newWindow = false } = {}) {
   if (extOf(it.name) === 'lnk') {
     const r = await call('GET', '/api/fs/shortcut', { query: { path: it.path } });
     if (!r.ok) return showError(r.data?.message || '바로 가기를 열 수 없습니다', displayName(it));
-    return openItem(r.data, { newWindow });
+    return openItem(r.data, { newWindow, external });
   }
-  await window.rd.openFile(it.path);
+  await window.rd.openFile(it.path, { external });
 }
 
 function openSelection() {
@@ -891,7 +891,9 @@ async function handleMenu(id, ctx = {}) {
     case 'term':
       return openTerminal(arg, ctx.cwd ?? currentDir());
     case 'open':
-      return arg === 'newwin' ? openItem(ctx.items[0], { newWindow: true }) : openSelection();
+      if (arg === 'newwin') return openItem(ctx.items[0], { newWindow: true });
+      if (arg === 'external') return openItem(ctx.items[0], { external: true });
+      return openSelection();
     case 'cut':
       return setClip('cut', ctx.items);
     case 'copy':
@@ -939,6 +941,7 @@ async function itemMenu(items, fromSidebar = false) {
   const tpl = [
     { id: 'open', label: '열기' },
     ...(isDir ? [{ id: 'open:newwin', label: '새 창에서 열기' }] : []),
+    ...(one && !isDir && !special ? [{ id: 'open:external', label: '노트북 기본 앱으로 열기' }] : []),
     SEP,
     ...(isDir ? [...terminalMenuItems(one.path), SEP] : []),
     ...(isDir && state.quick

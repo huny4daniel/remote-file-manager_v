@@ -50,7 +50,14 @@ contextBridge.exposeInMainWorld('rd', {
     export: (pcId, password) => ipcRenderer.invoke('wirewol:export', pcId, password),
   },
   icon: (key, size) => ipcRenderer.invoke('icon', key, size),
-  openFile: (remotePath) => ipcRenderer.invoke('file:open', remotePath),
+  openFile: (remotePath, opts) => ipcRenderer.invoke('file:open', remotePath, opts),
+  viewer: {
+    text: (localPath) => ipcRenderer.invoke('viewer:text', localPath),
+    external: (localPath, remotePath) => ipcRenderer.invoke('viewer:external', localPath, remotePath),
+    reload: (remotePath) => ipcRenderer.invoke('viewer:reload', remotePath),
+    siteUrl: (remotePath) => ipcRenderer.invoke('viewer:siteUrl', remotePath),
+    devtools: () => ipcRenderer.invoke('viewer:devtools'),
+  },
   uploadPaths: (localPaths, remoteDir) => ipcRenderer.invoke('upload:paths', localPaths, remoteDir),
   downloadEntries: (entries) => ipcRenderer.invoke('download:paths', entries),
   clipboardFiles: () => ipcRenderer.invoke('clipboard:files'),
@@ -70,4 +77,5 @@ contextBridge.exposeInMainWorld('rd', {
   onProgress: on('progress'),
   onFsChanged: on('fs:changed'),
   onTunnel: on('tunnel:state'),
+  onViewerKey: on('viewer:key'),
 });

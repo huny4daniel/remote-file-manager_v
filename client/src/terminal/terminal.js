@@ -126,8 +126,9 @@ async function stageAndType(payload) {
 
 term.attachCustomKeyEventHandler((e) => {
   if (e.type !== 'keydown') return true;
-  const key = e.key.toLowerCase();
-  if (e.ctrlKey && key === 'c' && term.hasSelection()) {
+  // 한글 입력 상태에서는 e.key가 'ㅍ'·'ㅊ'처럼 들어오므로 물리 키(e.code)로 판단한다
+  const key = /^Key[A-Z]$/.test(e.code) ? e.code.slice(3).toLowerCase() : e.key.toLowerCase();
+  if (e.ctrlKey && !e.shiftKey && key === 'c' && term.hasSelection()) {
     window.rd.writeText(term.getSelection());
     term.clearSelection();
     return false;
@@ -136,7 +137,7 @@ term.attachCustomKeyEventHandler((e) => {
     if (term.hasSelection()) window.rd.writeText(term.getSelection());
     return false;
   }
-  if (e.ctrlKey && key === 'v') {
+  if ((e.ctrlKey && key === 'v' && !e.altKey) || (e.shiftKey && e.key === 'Insert')) {
     e.preventDefault();
     pasteFromClipboard();
     return false;
