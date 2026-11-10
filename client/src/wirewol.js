@@ -67,6 +67,11 @@ const DATA_ROOT = path.join(process.env.ProgramData || 'C:\\ProgramData', 'Remot
 const INSTALL_DIR = path.join(DATA_ROOT, 'tunnel');
 const CONF_DIR = path.join(DATA_ROOT, 'conf');
 const CONF_PATH = path.join(CONF_DIR, `${TUNNEL_NAME}.conf`);
+const VERSION_FILE = path.join(INSTALL_DIR, 'version.txt');
+// 설치된 터널 파일의 버전. tunnel_host.c, build_tunnel.ps1의 wireguard-windows 태그, tunnel-setup.ps1의
+// 서비스 구성을 바꿀 때만 올린다 — 그래야 앱 업데이트 때 다시 설치(UAC)를 요구한다.
+// (파일을 바이트로 비교하면 릴리즈마다 새로 빌드된 실행 파일의 빌드 시각이 달라 매번 재설치를 요구했다)
+const TUNNEL_VERSION = '1';
 const START_TIMEOUT_MS = 30000;
 const STOP_TIMEOUT_MS = 20000;
 
@@ -81,18 +86,13 @@ async function serviceState() {
   return { 1: 'stopped', 2: 'starting', 3: 'stopping', 4: 'running' }[m?.[1]] || 'stopped';
 }
 
-/** 서비스가 있고, 설치된 실행 파일이 이 버전에 들어 있는 것과 같은지 */
-async function tunnelInstalled() {
-  if ((await serviceState()) === 'missing') return false;
-  for (const name of RUNTIME_FILES) {
-    try {
-      const [a, b] = await Promise.all([fsp.readFile(path.join(runtimeDir(), name)), fsp.readFile(path.join(INSTALL_DIR, name))]);
-      if (!a.equals(b)) return false;
-    } catch {
-      return false;
-    }
-  }
-  return true;
+/** 'ok' | 'missing'(서비스나 파일 없음) | 'outdated'(이 버전이 요구하는 터널보다 옛것) */
+async function tunnelInstallState() {
+  if ((await serviceState()) === 'missing') return 'missing';
+  if (!RUNTIME_FILES.every((n) => fs.existsSync(path.join(INSTALL_DIR, n)))) return 'missing';
+  // 버전 파일은 이 방식을 도입하면서 생겼다 — 그 전에 설치된 터널은 버전 1과 같다
+  const installed = (await fsp.readFile(VERSION_FILE, 'utf8').catch(() => '1')).trim();
+  return installed === TUNNEL_VERSION ? 'ok' : 'outdated';
 }
 const runtimeBundled = () => RUNTIME_FILES.every((n) => fs.existsSync(path.join(runtimeDir(), n)));
 
@@ -110,10 +110,10 @@ async function installTunnel() {
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      "$a = '-NoProfile -ExecutionPolicy Bypass -File \"{0}\" -Source \"{1}\" -UserSid {2} -LogFile \"{3}\"' -f $env:RFM_SCRIPT, $env:RFM_SRC, $env:RFM_SID, $env:RFM_LOG; " +
+      "$a = '-NoProfile -ExecutionPolicy Bypass -File \"{0}\" -Source \"{1}\" -UserSid {2} -LogFile \"{3}\" -Version {4}' -f $env:RFM_SCRIPT, $env:RFM_SRC, $env:RFM_SID, $env:RFM_LOG, $env:RFM_VER; " +
         '$p = Start-Process -FilePath powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList $a; exit $p.ExitCode',
     ],
-    { env: { ...process.env, RFM_SCRIPT: setupScript(), RFM_SRC: runtimeDir(), RFM_SID: sid, RFM_LOG: log } },
+    { env: { ...process.env, RFM_SCRIPT: setupScript(), RFM_SRC: runtimeDir(), RFM_SID: sid, RFM_LOG: log, RFM_VER: TUNNEL_VERSION } },
   );
   if (r.code === 0) return { ok: true };
   const detail = await fsp.readFile(log, 'utf8').catch(() => '');
@@ -414,7 +414,7 @@ module.exports = {
   getSecrets,
   updateSecrets,
   serviceState,
-  tunnelInstalled,
+  tunnelInstallState,
   runtimeBundled,
   installTunnel,
   tunnelUp,

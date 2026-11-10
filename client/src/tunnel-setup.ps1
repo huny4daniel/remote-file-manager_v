@@ -8,12 +8,14 @@
 param(
     [Parameter(Mandatory)] [string]$Source,
     [Parameter(Mandatory)] [string]$UserSid,
-    [string]$LogFile
+    [string]$LogFile,
+    [string]$Version = '1'
 )
 
 $ErrorActionPreference = 'Stop'
 try {
     if ($UserSid -notmatch '^S-1-[\d-]+$') { throw "잘못된 사용자 SID: $UserSid" }
+    if ($Version -notmatch '^[\w.-]+$') { throw "잘못된 버전: $Version" }
     $root = Join-Path $env:ProgramData 'RemoteFileManager'
     $bin = Join-Path $root 'tunnel'
     $confDir = Join-Path $root 'conf'
@@ -37,6 +39,8 @@ try {
         if (-not (Test-Path -LiteralPath $src)) { throw "내장 WireGuard 파일이 없습니다: $f" }
         Copy-Item -LiteralPath $src -Destination (Join-Path $bin $f) -Force
     }
+    # 앱이 다시 설치가 필요한지 판단하는 터널 버전 (실행 파일 바이트는 빌드마다 달라 비교에 쓸 수 없다)
+    Set-Content -LiteralPath (Join-Path $bin 'version.txt') -Value $Version -Encoding ascii
 
     $exe = Join-Path $bin 'rfm-tunnel-host.exe'
     $conf = Join-Path $confDir 'rfm.conf'

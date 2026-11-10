@@ -264,7 +264,8 @@ function ensureTunnel() {
     }
     if (!routes.length || (await anyPcReachable())) return setTunnel('direct');
     if (!ww.runtimeBundled()) return setTunnel('error', '이 빌드에는 내장 WireGuard 파일이 들어 있지 않습니다');
-    if (!(await ww.tunnelInstalled())) return setTunnel('notinstalled');
+    const installed = await ww.tunnelInstallState();
+    if (installed !== 'ok') return setTunnel('notinstalled', installed);
     setTunnel('starting');
     try {
       await ww.tunnelUp(conf, routes);

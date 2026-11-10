@@ -1451,7 +1451,10 @@ function renderTunnel() {
   const action = $('#wg-action');
   const [cls, text, act] = {
     noconf: ['', 'WireGuard 설정 없음 — 집 밖에서 접속하려면 WireWOL 설정에서 등록하세요', '설정'],
-    notinstalled: ['warn', '내장 WireGuard를 처음 한 번 설치해야 합니다 (관리자 권한 필요)', '설치'],
+    notinstalled:
+      t.message === 'outdated'
+        ? ['warn', '내장 WireGuard를 새 버전으로 업데이트해야 합니다 (관리자 권한 필요)', '업데이트']
+        : ['warn', '내장 WireGuard를 처음 한 번 설치해야 합니다 (관리자 권한 필요)', '설치'],
     direct: ['up', 'PC에 바로 연결됩니다 — WireGuard 필요 없음', ''],
     starting: ['warn', t.message || 'WireGuard 연결 중...', ''],
     up: ['up', 'WireGuard 연결됨 — 프로그램을 끝낼 때 함께 꺼집니다', ''],
